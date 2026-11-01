@@ -354,7 +354,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
 
     @app.post("/api/jobs/{job_id}/approve")
     async def approve_job(job_id: str, body: NoteIn):
-        return job_view(approve(store, tasks, settings, job_id, body.note))
+        # in a thread: approval now also writes a Word file
+        return job_view(await asyncio.to_thread(approve, store, tasks, settings, job_id, body.note))
 
     @app.post("/api/jobs/{job_id}/messages")
     async def message_job(job_id: str, message: str = Form(""), files: list[UploadFile] = File(default=[])):

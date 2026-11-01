@@ -3,6 +3,7 @@
     python3 -m kb_search "แรงดันตก"              best matches: file, page or line, and the text around them
     python3 -m kb_search "breaker Icu" --full    the whole matching passages
     python3 -m kb_search "IEC" --in knowledge/engineering
+    python3 -m kb_search --show knowledge/pricing/price-list.xlsx    a whole file as indexed (Excel, approved outputs)
     python3 -m kb_search --status                what is indexed
 
 The index is SQLite FTS5 with the trigram tokenizer, which matches any substring of 3 or more characters,
@@ -27,9 +28,15 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import xlsx_text  # noqa: E402
+
 VERSION = "1.0"
 TEXT_EXTS = {".md", ".txt", ".csv", ".json", ".vtt", ".srt", ".html", ".xml", ".yaml", ".yml"}
-EXTS = TEXT_EXTS | {".pdf", ".docx"}
+EXCEL_EXTS = {".xlsx", ".xlsm"}
+EXTS = TEXT_EXTS | EXCEL_EXTS | {".pdf", ".docx"}
+SKIP_IN_ROOT = {"library": {".docx"}}  # Word copies of approved outputs: the .md next to them is indexed
+SHOW_MAX_CHARS = 60_000
 IGNORED_PREFIXES = (".", "@", "#", "~$")  # Synology @eaDir, #recycle, Office lock files
 CHUNK_CHARS = 1200
 OVERLAP = 120              # a match that straddles two passages is still found
@@ -37,7 +44,7 @@ MAX_FILE_BYTES = 200 * 1024 * 1024
 PDF_TIMEOUT = 180
 LOCATION = {"pdf": "หน้า", "docx": "ย่อหน้า", "text": "บรรทัด"}
 SOURCE = {"knowledge": "คลังความรู้", "library": "ผลงานที่อนุมัติแล้ว"}
-KIND = {"pdf": "PDF", "docx": "Word", "text": "ข้อความ"}
+KIND = {"pdf": "PDF", "docx": "Word", "xlsx": "Excel", "text": "ข้อความ"}
 _W_T = re.compile(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>|<w:tab/>|</w:p>")
 # pdftotext puts stray spaces around Thai vowel and tone marks ("แรงดั นตก", "ไฟฟ้ า"); Thai has no spaces inside
 # words, so a space touching a mark with Thai on the other side is dropped
@@ -124,12 +131,45 @@ def extract(path: Path) -> tuple[str, list[tuple[int, str]], str]:
         except (zipfile.BadZipFile, KeyError):
             return "docx", [], "อ่านไฟล์ Word ไม่ได้"
         return "docx", [(1, normalise(text))], ""
+    if ext in EXCEL_EXTS:
+        try:
+            sheets = xlsx_text.read_workbook(path)
+        except xlsx_text.XlsxError:
+            return "xlsx", [], "อ่านไฟล์ Excel ไม่ได้"
+        pages = []
+        for sheet in sheets:  # one line per row, "[แถว 12] a | b | c", so a match shows its row
+            lines = [f"[แถว {n}] " + " | ".join(values) for n, values in sheet["rows"]]
+            if lines:
+                pages.append((sheet["name"] + (" (ชีตซ่อน)" if sheet["hidden"] else ""), normalise("\n".join(lines))))
+        note = "; ".join(f"ชีต {s['name']} ยาวเกิน {xlsx_text.MAX_ROWS:,} แถว ทำดัชนีเฉพาะส่วนต้น" for s in sheets if s["truncated"])
+        return "xlsx", pages, note
     return "text", [(1, normalise(_read_text(path)))], ""
 
 
+def _sheet_passages(pages: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Excel: rows grouped into passages of about CHUNK_CHARS; every passage after a sheet's first repeats
+    its header row, so a match deep in a price list still shows what the columns are."""
+    out = []
+    for sheet, text in pages:
+        lines = text.split("\n")
+        header = "[หัวตาราง] " + lines[0].split("] ", 1)[-1]
+        buf, size = [], 0
+        for line in lines:
+            if buf and size + len(line) > CHUNK_CHARS:
+                out.append((sheet, "\n".join(buf)))
+                buf, size = [header], len(header)
+            buf.append(line[:CHUNK_CHARS * 2])
+            size += len(line) + 1
+        if buf:
+            out.append((sheet, "\n".join(buf)))
+    return out
+
+
 def passages(kind: str, pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
-    """Split into passages of about CHUNK_CHARS at line breaks. The location is the page for PDF, and the
-    line (paragraph for Word) where the passage starts otherwise."""
+    """Split into passages of about CHUNK_CHARS at line breaks. The location is the page for PDF, the sheet
+    for Excel, and the line (paragraph for Word) where the passage starts otherwise."""
+    if kind == "xlsx":
+        return _sheet_passages(pages)
     out = []
     for page, text in pages:
         lines, buf, start, size = text.split("\n"), [], None, 0
@@ -158,9 +198,11 @@ def candidates(roots: dict[str, Path]):
     for name, root in roots.items():
         if not root.is_dir():
             continue
+        skip = SKIP_IN_ROOT.get(name, set())
         for path in sorted(root.rglob("*")):
             rel = path.relative_to(root)
-            if (path.suffix.lower() in EXTS and not any(p.startswith(IGNORED_PREFIXES) for p in rel.parts)
+            ext = path.suffix.lower()
+            if (ext in EXTS and ext not in skip and not any(p.startswith(IGNORED_PREFIXES) for p in rel.parts)
                     and path.is_file()):
                 yield name, rel.as_posix(), path
 
@@ -196,7 +238,7 @@ def refresh(index: Path, roots: dict[str, Path], should_stop=None) -> dict:
                 conn.execute("DELETE FROM chunks WHERE path = ?", (key,))
                 conn.executemany("INSERT INTO chunks (path, loc, text) VALUES (?, ?, ?)",
                                  [(key, loc, text) for loc, text in parts])
-                units = max((loc for loc, _ in parts), default=0)
+                units = len({loc for loc, _ in parts}) if kind == "xlsx" else max((loc for loc, _ in parts), default=0)
                 conn.execute("INSERT OR REPLACE INTO docs VALUES (?,?,?,?,?,?,?,?,?,?)",
                              (key, root, rel, st.st_size, st.st_mtime_ns, kind, units,
                               sum(len(t) for _, t in parts), note, datetime.now().astimezone().isoformat(timespec="seconds")))
@@ -301,15 +343,65 @@ def search(index: Path, query: str, limit: int = 8, within: str = "") -> dict:
         rel = doc["rel"] if doc else r["path"].split("/", 1)[-1]
         kind = doc["kind"] if doc else "text"
         base = roots.get(root)
-        # a passage starts at `loc`; for text and Word, count down to the line of the match itself
-        loc = r["loc"] if kind == "pdf" else r["loc"] + r["text"][:_first_hit(r["text"], terms)].count("\n")
+        hit = _first_hit(r["text"], terms)
+        if kind == "xlsx":  # the location is the sheet; the row is written at the start of the matching line
+            line = r["text"][r["text"].rfind("\n", 0, hit) + 1:]
+            row = re.match(r"\[แถว (\d+)\]", line)
+            loc, label = r["loc"], f"ชีต {r['loc']}" + (f" · แถว {row.group(1)}" if row else "")
+        else:  # a passage starts at `loc`; for text and Word, count down to the line of the match itself
+            loc = r["loc"] if kind == "pdf" else r["loc"] + r["text"][:hit].count("\n")
+            label = f"{LOCATION.get(kind, 'บรรทัด')} {loc}"
         results.append({"path": r["path"], "source": root, "rel": rel, "kind": kind, "loc": loc,
-                        "loc_label": f"{LOCATION.get(kind, 'บรรทัด')} {loc}",
+                        "loc_label": label,
                         "file": str(Path(base) / rel) if base else None,
                         "excerpt": _excerpt(r["text"], terms), "text": r["text"]})
         if len(results) >= limit:
             break
     return {"query": query, "terms": terms, "results": results}
+
+
+def show(index: Path, path: str) -> dict:
+    """Everything indexed for one file, in order: how Claude reads an Excel sheet or an approved output it
+    cannot open with Read. `path` is "knowledge/...", "library/...", a path inside the knowledge folder, or
+    the absolute path a search result printed."""
+    conn = connect(index, readonly=True)
+    try:
+        roots = json.loads((conn.execute("SELECT value FROM meta WHERE key='roots'").fetchone() or ["{}"])[0])
+        wanted = path.strip()
+        keys = [wanted, f"knowledge/{wanted.lstrip('/')}"]
+        for name, base in roots.items():
+            if wanted.startswith(base.rstrip("/") + "/"):
+                keys.insert(0, f"{name}/{wanted[len(base.rstrip('/')) + 1:]}")
+        doc = next((d for k in keys for d in conn.execute("SELECT * FROM docs WHERE path = ?", (k,))), None)
+        if doc is None:
+            raise SearchError(f"ไม่พบ {path} ในดัชนี (ดูชื่อไฟล์จากผลค้น หรือ --status)")
+        parts = conn.execute("SELECT loc, text FROM chunks WHERE path = ? ORDER BY rowid", (doc["path"],)).fetchall()
+    finally:
+        conn.close()
+    return {"path": doc["path"], "kind": doc["kind"], "note": doc["note"], "passages": [(p["loc"], p["text"]) for p in parts]}
+
+
+def render_show(doc: dict) -> str:
+    kind = doc["kind"]
+    out, size, last_loc, previous = [f"{doc['path']} ({KIND.get(kind, kind)}) ทั้งไฟล์ตามที่ทำดัชนีไว้"], 0, None, ""
+    if doc["note"]:
+        out.append(f"หมายเหตุ: {doc['note']}")
+    for loc, text in doc["passages"]:
+        lines = text.split("\n")
+        if loc != last_loc and (kind in ("pdf", "xlsx")):
+            out.append(f"--- {'หน้า' if kind == 'pdf' else 'ชีต'} {loc}")
+        elif kind == "xlsx" and lines[0].startswith("[หัวตาราง]"):
+            lines = lines[1:]  # the repeated header row
+        elif previous.endswith(lines[0]):
+            lines = lines[1:]  # the overlap carried over from the previous passage
+        last_loc, previous = loc, text
+        for line in lines:
+            size += len(line) + 1
+            if size > SHOW_MAX_CHARS:
+                out.append(f"... (ยาวเกิน {SHOW_MAX_CHARS:,} ตัวอักษร ส่วนที่เหลือใช้การค้นด้วยคำแทน)")
+                return "\n".join(out)
+            out.append(line)
+    return "\n".join(out)
 
 
 # ------------------------------------------------------------------ command line
@@ -323,7 +415,8 @@ def render(found: dict, full: bool) -> str:
         lines.append(f"{i}. {where} · {r['loc_label']}")
         body = r["text"].strip() if full else r["excerpt"]
         lines += [f"   {line}" for line in body.splitlines() if line.strip()]
-    lines.append("อ่านต่อ: ไฟล์ในคลังความรู้เปิดด้วย Read ได้ (PDF ระบุหน้าได้) ส่วนผลงานที่อนุมัติแล้วใช้ --full ดูข้อความเต็ม")
+    lines.append("อ่านต่อ: ไฟล์ในคลังความรู้เปิดด้วย Read ได้ (PDF ระบุหน้าได้) ส่วนไฟล์ Excel และผลงานที่อนุมัติแล้ว "
+                 "ใช้ --show <ไฟล์> หรือ --full")
     return "\n".join(lines)
 
 
@@ -337,11 +430,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--in", dest="within", default="", help="จำกัดโฟลเดอร์ เช่น knowledge/engineering หรือ library/proposal-draft")
     parser.add_argument("--full", action="store_true", help="แสดงข้อความทั้งช่วง ไม่ใช่แค่รอบคำที่พบ")
     parser.add_argument("--status", action="store_true", help="สรุปว่าทำดัชนีอะไรไว้บ้าง")
+    parser.add_argument("--show", metavar="PATH", help="แสดงทั้งไฟล์ตามที่ทำดัชนีไว้ เช่น ไฟล์ Excel หรือผลงานที่อนุมัติแล้ว")
     parser.add_argument("--json", action="store_true", help="แสดงผลเป็น JSON")
     parser.add_argument("--version", action="version", version=f"kb_search {VERSION}")
     args = parser.parse_args(argv)
     index = Path(os.environ.get("KB_INDEX", "/data/state/kb.sqlite"))
     try:
+        if args.show:
+            doc = show(index, args.show)
+            print(json.dumps(doc, ensure_ascii=False, indent=2) if args.json else render_show(doc))
+            return 0
         if args.status:
             info = status(index)
             kinds = ", ".join(f"{KIND.get(k, k)} {n}" for k, n in sorted(info["by_kind"].items()))

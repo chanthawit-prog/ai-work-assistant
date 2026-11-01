@@ -11,8 +11,8 @@ read the result, then approve it or tell Claude what to change. Processing runs 
 subscription; the NAS stores every file and serves this dashboard. Recurring jobs (งานประจำ) repeat a request on a
 weekly timetable, and engineering jobs can call a small calculation toolkit (pec_calc) whose every result carries its
 formula, assumptions, references and the team's sign-off status. A full-text index of the knowledge folder (PDF, Word,
-text) lets Claude and the user find the right page before reading, and the dashboard can be added to a phone's home
-screen.
+Excel, text) lets Claude and the user find the right page or row before reading, attached Excel files reach Claude as
+CSV, approved results are also saved as Word in the library, and the dashboard can be added to a phone's home screen.
 
 ## Users and scene
 
