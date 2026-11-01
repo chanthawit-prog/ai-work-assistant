@@ -1,4 +1,4 @@
-"""Background helpers: the inbox folder watcher and the daily follow-up schedule."""
+"""Background helpers: the inbox folder watcher, the daily follow-up schedule and recurring jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -10,8 +10,9 @@ from pathlib import Path
 
 from .config import WEEKDAYS, Settings
 from .convert import has_readable_input, prepare_inputs
+from .schedules import ScheduleStore, create_job, is_due
 from .state import RuntimeState
-from .store import FAILED, JobStore, safe_filename
+from .store import FAILED, QUEUED, RUNNING, JobStore, safe_filename
 from .tasks import TaskStore
 
 log = logging.getLogger("assistant.watchers")
@@ -112,4 +113,44 @@ class FollowupScheduler:
                 self.tick()
             except Exception:
                 log.exception("follow-up schedule failed")
+            await asyncio.sleep(30)
+
+
+class RecurringScheduler:
+    """Creates the jobs of งานประจำ when they fall due (see app/schedules.py for the rules)."""
+
+    def __init__(self, store: JobStore, schedules: ScheduleStore):
+        self.store = store
+        self.schedules = schedules
+
+    def tick(self, now: datetime | None = None) -> list[str]:
+        now = now or datetime.now().astimezone()
+        today = now.date().isoformat()
+        created = []
+        for schedule in self.schedules.all():
+            try:
+                due = is_due(schedule, now)
+            except (KeyError, TypeError, ValueError):  # a hand-edited entry must not stop the others
+                log.warning("schedule %s is malformed, skipped", schedule.get("id"))
+                continue
+            if not due:
+                continue
+            last_id = (schedule.get("last_job") or {}).get("job_id")
+            last = self.store.get(last_id) if last_id else None
+            if last and last.get("status") in (QUEUED, RUNNING):
+                self.schedules.mark_run(schedule["id"], today, None, skipped="รอบก่อนยังไม่เสร็จ จึงข้ามรอบนี้")
+                log.info("schedule %s skipped: %s is still %s", schedule["id"], last_id, last.get("status"))
+                continue
+            job = create_job(self.store, schedule, now)
+            self.schedules.mark_run(schedule["id"], today, job["id"])
+            log.info("schedule %s created job %s", schedule["id"], job["id"])
+            created.append(job["id"])
+        return created
+
+    async def loop(self) -> None:
+        while True:
+            try:
+                self.tick()
+            except Exception:
+                log.exception("recurring schedule failed")
             await asyncio.sleep(30)

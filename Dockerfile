@@ -25,6 +25,7 @@ COPY requirements.txt .
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY scripts ./scripts
+COPY tools ./tools
 
 # HOME holds Claude Code's login and session history; mount it as a volume so it survives rebuilds.
 ENV PATH=/opt/venv/bin:$PATH \

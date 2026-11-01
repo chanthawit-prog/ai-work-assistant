@@ -29,6 +29,7 @@ import signal
 import time
 from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import sysmon
 from .config import Settings
@@ -43,9 +44,14 @@ from .tasks import TaskStore
 log = logging.getLogger("assistant.runner")
 
 STREAM_LIMIT = 32 * 1024 * 1024  # stream-json lines can be large (tool results)
+RECENT_DAYS = 7          # "ผลงานที่อนุมัติใน 7 วันล่าสุด" for recurring jobs
+RECENT_MAX_FILES = 40
+RECENT_MAX_BYTES = 3 * 1024 * 1024
+RECENT_EXTS = {".md", ".txt", ".json", ".csv"}
 MAX_QUOTA_WAITS = 3
 MAX_STDERR_LINES = 40
 BASE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"  # pec_calc, for jobs that may run python3
 MESSAGE_STATUSES = (NEEDS_REVIEW, DONE, FAILED, CANCELLED)  # states in which you can talk to Claude again
 MEM_FIRST_SAMPLE_SEC = 0.5  # skip the instant between exec and the runtime loading
 MEM_SAMPLE_SEC = 1
@@ -125,9 +131,12 @@ class Runner:
         """Copy in material Claude needs but should not be able to modify."""
         ctx = self.store.area_dir(job["id"], "context")
         ctx.mkdir(parents=True, exist_ok=True)
-        if job_type.id == "follow-up":
+        include = set((job.get("params") or {}).get("include") or [])
+        if job_type.id == "follow-up" or "tasks" in include:
             write_json(ctx / "action_items.json", self.tasks.open_items())
-        elif job_type.id == "sales-brief":
+        if "recent" in include:
+            self._copy_recent(ctx / "recent")
+        if job_type.id == "sales-brief":
             customer = str((job.get("params") or {}).get("customer", "")).strip().lower()
             meetings = self.settings.library_dir / "meeting-summary"
             if customer and meetings.is_dir():
@@ -138,6 +147,25 @@ class Runner:
                 for path in found:
                     shutil.copy2(path, dest / path.name)
         return [p.relative_to(ctx).as_posix() for p in sorted(ctx.rglob("*")) if p.is_file()]
+
+    def _copy_recent(self, dest) -> None:
+        """Approved outputs of the last RECENT_DAYS days, newest first, within a size budget."""
+        library = self.settings.library_dir
+        if not library.is_dir():
+            return
+        since = datetime.now().timestamp() - RECENT_DAYS * 86400
+        files = sorted((p for p in library.rglob("*") if p.is_file() and p.suffix.lower() in RECENT_EXTS
+                        and not p.name.startswith((".", "@")) and p.stat().st_mtime >= since),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        used = 0
+        for path in files[:RECENT_MAX_FILES]:
+            size = path.stat().st_size
+            if used + size > RECENT_MAX_BYTES:
+                continue
+            target = dest / path.relative_to(library)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+            used += size
 
     # -- running -------------------------------------------------------------
     def _step(self, job_id: str, run: int, kind: str, text: str) -> None:
@@ -195,10 +223,15 @@ class Runner:
 
         meta = RunMeta()
         oom_before = (sysmon.container_memory() or {}).get("oom_kills")
+        env = claude_env(self.settings.claude_low_memory)
+        if job_type.allow_python and self.settings.allow_python:
+            # `python3 -m pec_calc ...` (and `import pec_calc`) work from the job folder; the toolkit finds the
+            # company tables and the team's sign-off in the knowledge folder
+            env["PYTHONPATH"] = os.pathsep.join(p for p in (str(TOOLS_DIR), env.get("PYTHONPATH", "")) if p)
+            env["PEC_CALC_KNOWLEDGE"] = str(self.settings.knowledge_dir)
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=str(job_dir), env=claude_env(self.settings.claude_low_memory), stdin=PIPE, stdout=PIPE,
-                stderr=PIPE, limit=STREAM_LIMIT)
+                *cmd, cwd=str(job_dir), env=env, stdin=PIPE, stdout=PIPE, stderr=PIPE, limit=STREAM_LIMIT)
         except OSError as exc:
             self._finish(job_id, run_no, None, meta, error=f"เรียกคำสั่ง {self.settings.claude_bin} ไม่ได้: {exc}")
             return

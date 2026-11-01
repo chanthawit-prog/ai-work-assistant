@@ -12,6 +12,12 @@ from .config import Settings
 from .jobtypes import JobType
 
 BUNDLED_DIR = Path(__file__).parent / "prompts"
+# what the files the app puts in context/ are, so Claude does not have to guess
+CONTEXT_NOTES = {
+    "action_items.json": "รายการติดตามงาน (action item) ที่ยังเปิดอยู่ จากการประชุมที่ผู้ใช้อนุมัติแล้ว",
+    "recent/": "ผลงานที่ผู้ใช้ตรวจและอนุมัติแล้วใน 7 วันล่าสุด แยกโฟลเดอร์ตามชนิดงาน",
+    "meetings/": "สรุปประชุมที่อนุมัติแล้วซึ่งกล่าวถึงลูกค้ารายนี้",
+}
 THAI_DAYS = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]
 
 
@@ -59,12 +65,20 @@ def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[
         f"ชื่องาน: {job['title']}",
         f"วันนี้: {today_text()}",
     ]
-    customer = (job.get("params") or {}).get("customer")
+    params = job.get("params") or {}
+    if params.get("schedule_id"):
+        lines.append(f"ที่มา: งานประจำ \"{params.get('schedule_name') or params['schedule_id']}\" ที่ระบบสร้างให้ตามเวลา "
+                     "ให้เขียนผลสำหรับรอบนี้ (อ้างอิงวันที่วันนี้)")
+    customer = params.get("customer")
     if customer:
         lines.append(f"ลูกค้า: {customer}")
     lines += ["", "ไฟล์ input:"] + ([f"- input/{f}" for f in inputs] or ["- (ไม่มี)"])
     if context:
         lines += ["", "ข้อมูลประกอบที่ระบบเตรียมไว้:"] + [f"- context/{f}" for f in context]
+        notes = [f"- context/{key} คือ{text}" for key, text in CONTEXT_NOTES.items()
+                 if any(f == key or f.startswith(key) for f in context)]
+        if notes:
+            lines += ["", "ความหมายของข้อมูลประกอบ:", *notes]
     lines += ["", f"คลังความรู้ (อ่านอย่างเดียว): {settings.knowledge_dir}"]
     if job.get("instructions"):
         lines += ["", "คำสั่ง / คำถามจากผู้ใช้:", job["instructions"]]

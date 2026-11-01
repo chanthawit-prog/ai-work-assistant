@@ -12,6 +12,7 @@ Environment knobs (for tests):
   FAKE_CLAUDE_SKIP_OUTPUTS=1   succeed without writing the output files
   FAKE_CLAUDE_CRASH=kill       die mid-run by SIGKILL, as the kernel's OOM killer would do it
   FAKE_CLAUDE_CRASH=oom        print an out-of-memory error on stderr and exit
+  FAKE_CLAUDE_DUMP_ENV=<file>  write the environment it was started with to <file> (JSON)
 """
 import json
 import os
@@ -73,6 +74,8 @@ def main(argv: list) -> int:
         print("fake-claude: only -p (print mode) is supported", file=sys.stderr)
         return 2
 
+    if os.environ.get("FAKE_CLAUDE_DUMP_ENV"):
+        Path(os.environ["FAKE_CLAUDE_DUMP_ENV"]).write_text(json.dumps(dict(os.environ)), encoding="utf-8")
     prompt = sys.stdin.read()
     delay = float(os.environ.get("FAKE_CLAUDE_DELAY", "0.6"))
     session = arg_value(argv, "--resume") or str(uuid.uuid4())

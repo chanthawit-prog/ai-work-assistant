@@ -1,0 +1,4 @@
+{
+  "_readme": "คัดลอกเป็น knowledge/engineering/calc-verified.json แล้วใส่เฉพาะฟังก์ชันที่วิศวกรตรวจกับกรณีทดสอบใน docs/calc-tools.md แล้ว",
+  "current": {"by": "ชื่อวิศวกร (เลขใบอนุญาต)", "date": "2026-11-15", "version": "1.0", "note": "ตรวจกับกรณีทดสอบ C1–C3"}
+}

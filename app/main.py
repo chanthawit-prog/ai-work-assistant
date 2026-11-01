@@ -27,12 +27,14 @@ from .jobtypes import JOB_TYPES
 from .notify import Notifier
 from .review import approve, slugify
 from .runner import MESSAGE_STATUSES, Runner
+from .schedules import INCLUDES, ScheduleStore, next_run, schedulable_types
+from .schedules import create_job as create_scheduled_job
 from .state import RuntimeState
 from .store import AREAS, JOB_ID_RE, JobStore, now_iso, read_json
 from .tasks import TaskStore
-from .watchers import FollowupScheduler, InboxWatcher
+from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
@@ -58,6 +60,17 @@ class MessageIn(BaseModel):
 
 class TaskStatusIn(BaseModel):
     status: str
+
+
+class ScheduleIn(BaseModel):
+    name: str = ""
+    type: str = "general"
+    instructions: str = ""
+    customer: str = ""
+    days: list[str] = []
+    time: str = ""
+    include: list[str] = []
+    enabled: bool = True
 
 
 class UploadTooLarge(Exception):
@@ -129,6 +142,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     runner = Runner(store, tasks, state, settings, notifier=notifier)
     inbox = InboxWatcher(store, settings)
     scheduler = FollowupScheduler(store, tasks, state, settings)
+    schedules = ScheduleStore(settings.data_dir / "config" / "schedules.json")
+    recurring = RecurringScheduler(store, schedules)
 
     async def refresh_claude() -> dict:
         status = await check_claude(settings)
@@ -173,7 +188,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         background = []
         if start_background:
             background = [asyncio.create_task(c) for c in
-                          (runner.loop(), inbox.loop(), scheduler.loop(), claude_check_loop())]
+                          (runner.loop(), inbox.loop(), scheduler.loop(), recurring.loop(), claude_check_loop())]
             log.info("data=%s knowledge=%s claude=%s", settings.data_dir, settings.knowledge_dir, settings.claude_bin)
         yield
         for task in background:
@@ -182,6 +197,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     app = FastAPI(title="AI Work Assistant", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.store, app.state.runner = settings, store, runner
     app.state.tasks, app.state.inbox, app.state.scheduler, app.state.notifier = tasks, inbox, scheduler, notifier
+    app.state.schedules, app.state.recurring = schedules, recurring
     if settings.dashboard_password:
         app.add_middleware(BasicAuth, user=settings.dashboard_user, password=settings.dashboard_password)
     app.add_middleware(UploadLimit, max_bytes=max_upload, message=too_large)
@@ -422,6 +438,47 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     @app.post("/api/jobs/{job_id}/cancel")
     async def cancel_job(job_id: str):
         return job_view(await runner.cancel(job_id))
+
+    # -- recurring jobs (งานประจำ) ---------------------------------------------------
+    def schedule_view(item: dict, now: datetime) -> dict:
+        job_type = JOB_TYPES.get(item["type"])
+        last = item.get("last_job") or {}
+        job = store.get(last["job_id"]) if last.get("job_id") else None
+        upcoming = next_run(item, now)
+        return {**item, "type_label": job_type.label if job_type else item["type"],
+                "next_run": upcoming.isoformat(timespec="seconds") if upcoming else None,
+                "last_job_info": item.get("last_job"),
+                "last_job": {"id": job["id"], "title": job["title"], "status": job["status"]} if job else None}
+
+    @app.get("/api/schedules")
+    async def list_schedules():
+        now = datetime.now().astimezone()
+        return {"items": [schedule_view(s, now) for s in schedules.all()],
+                "types": schedulable_types(), "includes": INCLUDES,
+                "followup": {"time": settings.followup_time, "days": list(settings.followup_days)}}
+
+    @app.post("/api/schedules")
+    async def add_schedule(body: ScheduleIn):
+        return schedule_view(schedules.create(body.model_dump()), datetime.now().astimezone())
+
+    @app.put("/api/schedules/{schedule_id}")
+    async def edit_schedule(schedule_id: str, body: ScheduleIn):
+        return schedule_view(schedules.update(schedule_id, body.model_dump()), datetime.now().astimezone())
+
+    @app.delete("/api/schedules/{schedule_id}")
+    async def delete_schedule(schedule_id: str):
+        schedules.delete(schedule_id)
+        return {"ok": True}
+
+    @app.post("/api/schedules/{schedule_id}/run")
+    async def run_schedule(schedule_id: str):
+        """Run now, outside the timetable. Today's scheduled run still happens (unless this job is unfinished)."""
+        item = schedules.get(schedule_id)
+        if item is None:
+            raise KeyError(schedule_id)
+        job = create_scheduled_job(store, item, datetime.now().astimezone())
+        schedules.mark_manual(schedule_id, job["id"])
+        return job_view(job)
 
     # -- follow-up list --------------------------------------------------------
     @app.get("/api/tasks")

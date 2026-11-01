@@ -1,7 +1,7 @@
 .env
-data/
-knowledge/
-claude-home/
+/data/
+/knowledge/
+/claude-home/
 __pycache__/
 *.pyc
 .pytest_cache/

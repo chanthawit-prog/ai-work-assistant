@@ -16,7 +16,7 @@ const STATUS = {
   failed: ["ไม่สำเร็จ", "failed"],
   cancelled: ["ยกเลิกแล้ว", "cancelled"],
 };
-const SOURCES = { dashboard: "สั่งจากหน้าเว็บ", inbox: "จากโฟลเดอร์ inbox", schedule: "ระบบสร้างตามเวลา" };
+const SOURCES = { dashboard: "สั่งจากหน้าเว็บ", inbox: "จากโฟลเดอร์ inbox", schedule: "งานประจำ" };
 const PRIORITY = { high: "สูง", medium: "กลาง", low: "ต่ำ" };
 const DAYS = { mon: "จ.", tue: "อ.", wed: "พ.", thu: "พฤ.", fri: "ศ.", sat: "ส.", sun: "อา." };
 const QUOTA_WINDOWS = { five_hour: "รอบ 5 ชม.", seven_day: "รายสัปดาห์", seven_day_opus: "รายสัปดาห์ (Opus)", seven_day_sonnet: "รายสัปดาห์ (Sonnet)" };
@@ -917,6 +917,223 @@ function renderTasks(items) {
   }));
 }
 
+/* ---------------------------------------------------------------- recurring jobs (งานประจำ) */
+const DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const DAY_FULL = { mon: "จันทร์", tue: "อังคาร", wed: "พุธ", thu: "พฤหัสบดี", fri: "ศุกร์", sat: "เสาร์", sun: "อาทิตย์" };
+function daysText(days) {
+  const list = DAY_ORDER.filter((d) => days.includes(d));
+  if (list.length === 7) return "ทุกวัน";
+  if (list.join(",") === "mon,tue,wed,thu,fri") return "วันจันทร์–ศุกร์";
+  if (list.length === 1) return `ทุกวัน${DAY_FULL[list[0]]}`;
+  return `ทุก ${list.map((d) => DAYS[d]).join(" ")}`;
+}
+const SCHEDULE_PRESETS = [
+  { label: "สรุปงานประจำสัปดาห์", name: "สรุปงานประจำสัปดาห์", type: "general", days: ["fri"], time: "16:00", include: ["tasks", "recent"],
+    instructions: "สรุปงานของสัปดาห์นี้จากผลงานที่อนุมัติแล้วและรายการติดตามงาน: งานที่เสร็จ งานที่ค้างและติดอะไร ประเด็นที่ต้องตัดสินใจ และสิ่งที่ต้องทำสัปดาห์หน้า เขียนเป็นรายงานสั้นที่ส่งหัวหน้าได้ทันที" },
+  { label: "ทบทวนลูกค้าที่ควรติดตาม", name: "ทบทวนลูกค้าที่ควรติดตาม", type: "general", days: ["mon"], time: "08:30", include: ["recent"],
+    instructions: "ไล่ดูข้อมูลลูกค้าในคลังความรู้ (customers/) และผลงานที่อนุมัติใน 7 วันล่าสุด แล้วสรุปลูกค้าที่ควรติดต่อสัปดาห์นี้ เรียงตามความสำคัญ พร้อมเหตุผล สิ่งที่ควรเสนอ และร่างข้อความติดต่อสั้น ๆ" },
+];
+let scheduleData = null;
+
+async function showSchedules() {
+  $("#view").innerHTML = `
+    <section class="schedules" aria-labelledby="schTitle">
+      <div class="page-head">
+        <div><h1 id="schTitle">งานประจำ</h1>
+        <p class="lede">ให้ Claude ทำงานเดิมซ้ำตามวันและเวลาที่ตั้ง เช่น สรุปงานทุกวันศุกร์ ผลงานจะรอให้ตรวจเหมือนงานปกติ และใช้โควต้า subscription เหมือนกัน</p></div>
+        <button type="button" class="btn primary" id="schAdd">${icon("plus")}เพิ่มงานประจำ</button>
+      </div>
+      <div id="schForm"></div>
+      <div id="schList" aria-busy="true">${skeletonRows(2)}</div>
+    </section>`;
+  $("#schAdd").addEventListener("click", () => openScheduleForm(null));
+  poll(async () => {
+    scheduleData = await api("/api/schedules");
+    renderSchedules();
+    return 30000;
+  });
+}
+
+function renderSchedules() {
+  const el = $("#schList");
+  if (!el || !scheduleData) return;
+  el.removeAttribute("aria-busy");
+  const { items, followup, includes } = scheduleData;
+  const builtin = followup && followup.time ? `
+    <li class="schedule builtin">
+      <span class="job-icon">${icon("clock")}</span>
+      <div class="schedule-body">
+        <div class="schedule-title">ติดตามงานประจำวัน <span class="badge s-queued">ระบบ</span></div>
+        <div class="job-meta">ติดตามงาน · ${esc(daysText(followup.days))} เวลา ${esc(followup.time)} · สร้างเมื่อมีรายการค้างเท่านั้น</div>
+        <div class="schedule-last">ปรับเวลาได้ที่ FOLLOWUP_TIME และ FOLLOWUP_DAYS ในไฟล์ .env</div>
+      </div>
+    </li>` : "";
+  const row = (s) => {
+    const lastLines = [];
+    if (s.last_job) {
+      const when = s.last_job_info && s.last_job_info.at ? fmtTime(s.last_job_info.at) : s.last_job.title;
+      lastLines.push(`ล่าสุด <a href="#/job/${encodeURIComponent(s.last_job.id)}">${esc(when)}</a>${s.last_job_info && s.last_job_info.manual ? " (สั่งเอง)" : ""} ${badge(s.last_job.status)}`);
+    }
+    if (s.last_run && s.last_run.skipped) lastLines.push(`รอบ ${esc(fmtDate(s.last_run.date))} ข้ามไป: ${esc(s.last_run.skipped)}`);
+    const lastText = lastLines.join("<br>");
+    const extra = (s.include || []).map((k) => includes[k] || k);
+    return `<li class="schedule ${s.enabled ? "" : "off"}" data-id="${esc(s.id)}">
+      <span class="job-icon">${icon(TYPE_ICON[s.type] || "message")}</span>
+      <div class="schedule-body">
+        <div class="schedule-title">${esc(s.name)}${s.enabled ? "" : ` <span class="badge s-cancelled">ปิดอยู่</span>`}</div>
+        <div class="job-meta">${esc(s.type_label)}${s.customer ? ` · ${esc(s.customer)}` : ""} · ${esc(daysText(s.days))} เวลา ${esc(s.time)}${extra.length ? ` · แนบ${esc(extra.join(" และ "))}` : ""}</div>
+        <div class="schedule-next">${s.enabled ? (s.next_run ? `ครั้งถัดไป ${esc(fmtTime(s.next_run))}` : "") : "ไม่ทำงานจนกว่าจะเปิดอีกครั้ง"}</div>
+        ${lastText ? `<div class="schedule-last">${lastText}</div>` : ""}
+        <div class="actions">
+          <button type="button" class="btn" data-act="run">${icon("arrow-up")}รันตอนนี้</button>
+          <button type="button" class="btn quiet" data-act="edit">แก้ไข</button>
+          <button type="button" class="btn quiet" data-act="toggle">${s.enabled ? "ปิดชั่วคราว" : "เปิดใช้"}</button>
+          <button type="button" class="btn quiet danger-text" data-act="ask-delete">ลบ</button>
+        </div>
+      </div>
+    </li>`;
+  };
+  if (!items.length) {
+    el.innerHTML = `${builtin ? `<ul class="schedule-list">${builtin}</ul>` : ""}
+      <div class="empty"><h2>ยังไม่มีงานประจำ</h2>
+        <p>กด "เพิ่มงานประจำ" แล้วเลือกตัวอย่างได้ เช่น สรุปงานทุกวันศุกร์ 16:00 หรือทบทวนลูกค้าที่ควรติดตามทุกวันจันทร์เช้า</p></div>`;
+    return;
+  }
+  el.innerHTML = `<ul class="schedule-list">${builtin}${items.map(row).join("")}</ul>`;
+  $$(".schedule[data-id] [data-act]", el).forEach((btn) => btn.addEventListener("click", onScheduleAction));
+}
+
+async function onScheduleAction(e) {
+  const btn = e.currentTarget;
+  const li = btn.closest(".schedule");
+  const s = scheduleData.items.find((x) => x.id === li.dataset.id);
+  if (!s) return;
+  const act = btn.dataset.act;
+  const path = `/api/schedules/${encodeURIComponent(s.id)}`;
+  try {
+    if (act === "run") {
+      btn.disabled = true;
+      const job = await postJSON(`${path}/run`);
+      toast(`ส่ง "${s.name}" เข้าคิวแล้ว`);
+      location.hash = `#/job/${encodeURIComponent(job.id)}`;
+    } else if (act === "edit") {
+      openScheduleForm(s);
+    } else if (act === "toggle") {
+      await api(path, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...s, enabled: !s.enabled }) });
+      toast(s.enabled ? "ปิดงานประจำนี้ชั่วคราวแล้ว" : "เปิดใช้งานประจำนี้แล้ว");
+      scheduleData = await api("/api/schedules");
+      renderSchedules();
+    } else if (act === "ask-delete") {
+      const box = btn.closest(".actions");
+      box.innerHTML = `<span class="confirm-text">ลบงานประจำนี้? งานที่สร้างไปแล้วยังอยู่</span>
+        <button type="button" class="btn danger" data-act="delete">${icon("x")}ยืนยันลบ</button>
+        <button type="button" class="btn quiet" data-act="keep">ไม่ลบ</button>`;
+      $$("[data-act]", box).forEach((b) => b.addEventListener("click", onScheduleAction));
+      $("[data-act=keep]", box).focus();
+    } else if (act === "keep") {
+      renderSchedules();
+    } else if (act === "delete") {
+      await api(path, { method: "DELETE" });
+      toast("ลบงานประจำแล้ว");
+      scheduleData = await api("/api/schedules");
+      renderSchedules();
+    }
+  } catch (err) {
+    toast(err.message, "bad");
+    btn.disabled = false;
+  }
+}
+
+async function openScheduleForm(s) {
+  const types = (await getJobTypes()).filter((t) => scheduleData.types.includes(t.id));
+  const v = s || { name: "", type: "general", instructions: "", customer: "", days: ["mon", "tue", "wed", "thu", "fri"], time: "08:30", include: [], enabled: true };
+  const holder = $("#schForm");
+  holder.innerHTML = `
+    <form class="schedule-form" id="schFormEl" novalidate>
+      <h2>${s ? "แก้ไขงานประจำ" : "งานประจำใหม่"}</h2>
+      ${s ? "" : `<div class="presets"><span class="small muted">เริ่มจากตัวอย่าง:</span>${SCHEDULE_PRESETS.map((p, i) =>
+        `<button type="button" class="btn quiet" data-preset="${i}">${icon("repeat")}${esc(p.label)}</button>`).join("")}</div>`}
+      <div class="field"><label for="sName">ชื่องานประจำ</label>
+        <input id="sName" type="text" maxlength="120" autocomplete="off" placeholder="เช่น สรุปงานประจำสัปดาห์"></div>
+      <div class="field"><span class="label" id="sTypeLabel">ชนิดงาน</span>
+        <div class="chips" role="radiogroup" aria-labelledby="sTypeLabel">${types.map((t) => `
+          <label class="type-option"><input type="radio" name="sType" value="${esc(t.id)}"><span>${icon(TYPE_ICON[t.id] || "message")}${esc(t.label)}</span></label>`).join("")}</div></div>
+      <div class="field" id="sCustomerField" hidden><label for="sCustomer">ชื่อลูกค้า</label>
+        <input id="sCustomer" type="text" autocomplete="off" placeholder="ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/"></div>
+      <div class="field"><label for="sInstr">สิ่งที่ให้ Claude ทำทุกรอบ</label>
+        <textarea id="sInstr" rows="4" placeholder="เช่น สรุปงานที่เสร็จและงานค้างของสัปดาห์นี้ เป็นรายงานสั้นส่งหัวหน้า"></textarea></div>
+      <div class="field"><span class="label" id="sDaysLabel">วัน</span>
+        <div class="chips" role="group" aria-labelledby="sDaysLabel">${DAY_ORDER.map((d) => `
+          <label class="type-option"><input type="checkbox" name="sDay" value="${d}"><span>${esc(DAY_FULL[d])}</span></label>`).join("")}</div></div>
+      <div class="field"><span class="label" id="sTimeLabel">เวลา</span>
+        <div class="time-pick" role="group" aria-labelledby="sTimeLabel">
+          <select id="sHour" aria-label="ชั่วโมง">${Array.from({ length: 24 }, (_, h) => `<option>${String(h).padStart(2, "0")}</option>`).join("")}</select>
+          <span aria-hidden="true">:</span>
+          <select id="sMinute" aria-label="นาที">${Array.from({ length: 12 }, (_, m) => `<option>${String(m * 5).padStart(2, "0")}</option>`).join("")}</select>
+          <span class="muted small">น.</span>
+        </div></div>
+      <div class="field"><span class="label">ข้อมูลที่แนบให้ Claude ทุกรอบ</span>
+        ${Object.entries(scheduleData.includes).map(([k, label]) => `
+          <label class="check-option"><input type="checkbox" name="sInclude" value="${esc(k)}"> ${esc(label)}</label>`).join("")}</div>
+      <div class="form-actions">
+        <button type="submit" class="btn primary" id="sSave">${icon("check")}บันทึก</button>
+        <button type="button" class="btn quiet" id="sCancel">ยกเลิก</button>
+      </div>
+    </form>`;
+  const form = $("#schFormEl");
+  const fill = (x) => {
+    $("#sName").value = x.name || "";
+    $("#sInstr").value = x.instructions || "";
+    $("#sCustomer").value = x.customer || "";
+    /* 24-hour dropdowns: a native time input follows the browser's locale and may show "04:00 PM" */
+    const [hh, mm] = (x.time || "08:30").split(":");
+    const minute = $("#sMinute");
+    if (![...minute.options].some((o) => o.value === mm)) minute.add(new Option(mm, mm));
+    $("#sHour").value = hh.padStart(2, "0");
+    minute.value = mm;
+    $$("input[name=sType]", form).forEach((r) => (r.checked = r.value === (x.type || "general")));
+    $$("input[name=sDay]", form).forEach((c) => (c.checked = (x.days || []).includes(c.value)));
+    $$("input[name=sInclude]", form).forEach((c) => (c.checked = (x.include || []).includes(c.value)));
+    syncType();
+  };
+  const syncType = () => {
+    const t = types.find((x) => x.id === (form.elements.sType.value || "general"));
+    $("#sCustomerField").hidden = !(t && t.fields.some((f) => f.name === "customer"));
+  };
+  $$("input[name=sType]", form).forEach((r) => r.addEventListener("change", syncType));
+  $$("[data-preset]", form).forEach((b) => b.addEventListener("click", () => fill(SCHEDULE_PRESETS[Number(b.dataset.preset)])));
+  $("#sCancel").addEventListener("click", () => (holder.innerHTML = ""));
+  fill(v);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = {
+      name: $("#sName").value.trim(),
+      type: form.elements.sType.value,
+      instructions: $("#sInstr").value.trim(),
+      customer: $("#sCustomer").value.trim(),
+      days: $$("input[name=sDay]:checked", form).map((c) => c.value),
+      time: `${$("#sHour").value}:${$("#sMinute").value}`,
+      include: $$("input[name=sInclude]:checked", form).map((c) => c.value),
+      enabled: s ? s.enabled : true,
+    };
+    const save = $("#sSave");
+    save.disabled = true;
+    try {
+      const saved = await api(s ? `/api/schedules/${encodeURIComponent(s.id)}` : "/api/schedules", {
+        method: s ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast(saved.next_run ? `บันทึกแล้ว ครั้งถัดไป ${fmtTime(saved.next_run)}` : "บันทึกแล้ว");
+      holder.innerHTML = "";
+      scheduleData = await api("/api/schedules");
+      renderSchedules();
+    } catch (err) {
+      toast(err.message, "bad");
+      save.disabled = false;
+    }
+  });
+  $("#sName").focus();
+  holder.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+}
+
 /* ---------------------------------------------------------------- system */
 const CHANNELS = { synology: "Synology Chat", line: "LINE", webhook: "Webhook" };
 const EVENTS = { needs_review: "งานรอตรวจ", failed: "งานไม่สำเร็จ", quota_wait: "โควต้าเต็ม" };
@@ -1046,7 +1263,7 @@ async function showSystem() {
 function route() {
   viewToken += 1;
   const hash = location.hash || "#/";
-  const tab = hash.startsWith("#/tasks") ? "tasks" : hash.startsWith("#/system") ? "system" : "jobs";
+  const tab = hash.startsWith("#/tasks") ? "tasks" : hash.startsWith("#/schedules") ? "schedules" : hash.startsWith("#/system") ? "system" : "jobs";
   $$(".nav a").forEach((a) => {
     const on = a.dataset.tab === tab;
     a.classList.toggle("active", on);
@@ -1058,6 +1275,7 @@ function route() {
   const fail = (err) => ($("#view").innerHTML = `<p class="muted">${esc(err.message)}</p>`);
   if (hash.startsWith("#/job/")) return showJob(decodeURIComponent(hash.slice(6)));
   if (hash.startsWith("#/tasks")) return showTasks();
+  if (hash.startsWith("#/schedules")) return showSchedules().catch(fail);
   if (hash.startsWith("#/system")) return showSystem().catch(fail);
   return showHome().catch(fail);
 }

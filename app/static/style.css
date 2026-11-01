@@ -218,11 +218,16 @@ input[type=text], textarea {
   border: 1px solid var(--control); border-radius: var(--r-md);
   background: var(--surface); color: var(--ink); font: inherit; font-size: var(--fs-body); /* 16px avoids iOS zoom */
 }
-input[type=text]:focus-visible, textarea:focus-visible { outline-offset: 0; border-color: var(--focus); }
+input[type=text]:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; border-color: var(--focus); }
+select {
+  min-height: 40px; padding: 0 var(--s3);
+  border: 1px solid var(--control); border-radius: var(--r-md);
+  background: var(--surface); color: var(--ink); font: inherit; font-size: var(--fs-body); font-variant-numeric: tabular-nums;
+}
 input[aria-invalid=true] { border-color: var(--bad); }
 textarea { resize: none; line-height: 1.6; }
 ::placeholder { color: var(--ink-3); opacity: 1; }
-label { font-size: var(--fs-small); font-weight: 500; }
+label, .label { font-size: var(--fs-small); font-weight: 500; }
 
 /* ============================================================== setup notice (Claude not connected) */
 .setup { max-width: 820px; margin: 0 auto var(--s6); padding: var(--s5); border-radius: var(--r-lg); background: var(--bad-soft); color: var(--bad); }
@@ -489,6 +494,30 @@ td.num { white-space: nowrap; }
 }
 @keyframes fade { from { opacity: 0; } }
 
+/* ============================================================== recurring jobs (งานประจำ) */
+.schedules { max-width: 820px; margin: 0 auto; }
+.schedule-list { margin: 0 0 var(--s5); padding: 0; list-style: none; }
+.schedule { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 0 var(--s3); padding: var(--s4) 0; border-bottom: 1px solid var(--line); }
+.schedule .job-icon { padding-top: 3px; }
+.schedule-body { display: grid; gap: 2px; min-width: 0; }
+.schedule-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); font-weight: 500; }
+.schedule-next { color: var(--ink-2); font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
+.schedule-last { color: var(--ink-3); font-size: var(--fs-small); }
+.schedule .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); margin-top: var(--s2); }
+.schedule.off .schedule-title, .schedule.off .job-meta { color: var(--ink-3); }
+.btn.quiet.danger-text { color: var(--bad); }
+.btn.quiet.danger-text:hover { background: var(--bad-soft); }
+.schedule-form { display: grid; gap: var(--s4); margin-bottom: var(--s6); padding: var(--s5); border: 1px solid var(--control); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--lift); }
+.schedule-form h2 { font-size: var(--fs-h2); }
+.field { display: grid; gap: var(--s1); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--s1); }
+.chips .type-option span { border-color: var(--line); }
+.time-pick { display: flex; align-items: center; gap: var(--s2); }
+.check-option { display: flex; align-items: center; gap: var(--s2); min-height: 36px; font-weight: 400; color: var(--ink-2); cursor: pointer; }
+.check-option input { width: 18px; height: 18px; accent-color: var(--accent-ink); }
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); }
+.form-actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+
 /* ============================================================== larger screens */
 @media (min-width: 640px) {
   .tasks table { display: table; }
@@ -534,7 +563,7 @@ td.num { white-space: nowrap; }
   .sheet .doc { max-height: calc(100vh - 290px); overflow: auto; }
 }
 @media (pointer: coarse) {
-  .btn, .nav a, .back, .switch { min-height: 44px; }
+  .btn, .nav a, .back, .switch, .check-option, select { min-height: 44px; }
   .type-option span { min-height: 44px; }
   .tabs button, .icon-btn { min-height: 44px; min-width: 44px; }
   .files li { min-height: 44px; }

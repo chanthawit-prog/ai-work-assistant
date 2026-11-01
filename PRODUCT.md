@@ -8,7 +8,9 @@ reads (`/impeccable init` writes this file; it was written by hand here). Keep i
 **ผู้ช่วยงาน · AI Work Assistant** — a personal work assistant on a Synology NAS. You give Claude a task
 (meeting summary, follow-up, sales brief, proposal draft, engineering question, or anything else), watch it work,
 read the result, then approve it or tell Claude what to change. Processing runs on Claude with the owner's
-subscription; the NAS stores every file and serves this dashboard.
+subscription; the NAS stores every file and serves this dashboard. Recurring jobs (งานประจำ) repeat a request on a
+weekly timetable, and engineering jobs can call a small calculation toolkit (pec_calc) whose every result carries its
+formula, assumptions, references and the team's sign-off status.
 
 ## Users and scene
 
