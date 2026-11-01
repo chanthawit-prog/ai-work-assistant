@@ -26,7 +26,7 @@ from .events import RunMeta, summarize
 from .jobtypes import JOB_TYPES, JobType
 from .prompts import system_prompt, task_message
 from .state import RuntimeState
-from .store import CANCELLED, FAILED, NEEDS_REVIEW, QUEUED, RUNNING, JobStore, now_iso, read_json, write_json
+from .store import CANCELLED, DONE, FAILED, NEEDS_REVIEW, QUEUED, RUNNING, JobStore, now_iso, read_json, write_json
 from .tasks import TaskStore
 
 log = logging.getLogger("assistant.runner")
@@ -35,8 +35,7 @@ STREAM_LIMIT = 32 * 1024 * 1024  # stream-json lines can be large (tool results)
 MAX_QUOTA_WAITS = 3
 MAX_STDERR_LINES = 40
 BASE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
-RUN_LABELS = {"initial": "ส่งงานให้ Claude", "retry": "เริ่มทำงานนี้ใหม่อีกครั้ง",
-              "revision": "ส่งข้อแก้ไขให้ Claude ทำต่อจากของเดิม"}
+MESSAGE_STATUSES = (NEEDS_REVIEW, DONE, FAILED, CANCELLED)  # states in which you can talk to Claude again
 
 
 def claude_env() -> dict:
@@ -59,6 +58,7 @@ class Runner:
         self.procs: dict[str, asyncio.subprocess.Process] = {}
         self.cancel_reasons: dict[str, str] = {}
         self.last_step: dict[str, str] = {}
+        self.partial: dict[str, str] = {}  # text Claude is typing right now (from --include-partial-messages)
 
     # -- building a run ------------------------------------------------------
     def build_command(self, job_type: JobType, resume_session: str | None = None) -> list[str]:
@@ -68,7 +68,7 @@ class Runner:
             allowed.append("Bash(python3 *)")
         cmd = [
             self.settings.claude_bin, "-p",
-            "--output-format", "stream-json", "--verbose",
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
             "--permission-mode", "acceptEdits",
             "--permission-prompts", "none",
             "--tools", ",".join(tools),
@@ -108,6 +108,19 @@ class Runner:
         self.store.append_step(job_id, {"run": run, "kind": kind, "text": text})
         self.last_step[job_id] = text
 
+    @staticmethod
+    def request_text(job: dict, job_type: JobType) -> str:
+        """What the user asked for, as shown in the conversation."""
+        parts = []
+        if job_type.id != "general" or not job.get("instructions"):
+            parts.append(f"{job_type.label}: {job['title']}")
+        customer = (job.get("params") or {}).get("customer")
+        if customer:
+            parts.append(f"ลูกค้า: {customer}")
+        if job.get("instructions"):
+            parts.append(job["instructions"])
+        return "\n".join(parts)
+
     async def run_job(self, job_id: str) -> None:
         job = self.store.get(job_id)
         if not job or job["status"] != QUEUED:
@@ -120,7 +133,7 @@ class Runner:
         feedback = job.get("pending_feedback")
         resume = job.get("session_id") if feedback else None
         run_no = len(job["runs"]) + 1
-        kind = "revision" if feedback else ("retry" if job["runs"] else "initial")
+        kind = "message" if feedback else ("retry" if job["runs"] else "initial")
 
         warnings = prepare_inputs(job_dir / "input")
         inputs = [f["path"] for f in self.store.list_files(job_id, "input")]
@@ -132,7 +145,12 @@ class Runner:
                "exit_code": None, "model": None, "result": None, "usage": {}}
         self.store.update(job_id, status=RUNNING, runs=job["runs"] + [run], pending_feedback=None, error=None,
                           not_before=None, warnings=sorted(set(job.get("warnings", [])) | set(warnings)))
-        self._step(job_id, run_no, "app", RUN_LABELS[kind])
+        if kind == "retry":
+            self._step(job_id, run_no, "app", "เริ่มทำงานนี้ใหม่อีกครั้ง")
+        else:
+            text = feedback if kind == "message" else self.request_text(job, job_type)
+            self.store.append_step(job_id, {"run": run_no, "kind": "user", "text": text,
+                                            "files": inputs if kind == "initial" else []})
 
         meta = RunMeta()
         try:
@@ -187,6 +205,11 @@ class Runner:
                 continue
             if not isinstance(event, dict):
                 continue
+            if event.get("type") == "stream_event":  # token deltas: show live, don't log
+                self._track_partial(job_id, event)
+                continue
+            if event.get("type") == "assistant" and event.get("parent_tool_use_id") is None:
+                self.partial.pop(job_id, None)
             self.store.append_event(job_id, run_no, event)
             known_session = meta.session_id
             meta.observe(event)
@@ -196,6 +219,17 @@ class Runner:
                 self.state.set_quota(event.get("rate_limit_info") or {})
             for step in summarize(event, job_dir):
                 self._step(job_id, run_no, step["kind"], step["text"])
+
+    def _track_partial(self, job_id: str, event: dict) -> None:
+        if event.get("parent_tool_use_id") is not None:
+            return
+        inner = event.get("event") or {}
+        if inner.get("type") == "message_start":
+            self.partial.pop(job_id, None)
+        elif inner.get("type") == "content_block_delta":
+            delta = inner.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                self.partial[job_id] = (self.partial.get(job_id, "") + str(delta.get("text", "")))[-20000:]
 
     async def _read_stderr(self, job_id: str, run_no: int, proc) -> None:
         shown = 0
@@ -229,7 +263,7 @@ class Runner:
                 resume_at = datetime.fromtimestamp(meta.quota_reset_at + 60).astimezone()
                 job["quota_waits"] = job.get("quota_waits", 0) + 1
                 job["not_before"] = resume_at.isoformat(timespec="seconds")
-                if run["kind"] == "revision":
+                if run["kind"] == "message":
                     job["pending_feedback"] = run.get("feedback")
                 status, message = QUEUED, f"โควต้า subscription เต็ม ระบบจะเริ่มใหม่เองเวลา {resume_at:%H:%M}"
             else:
@@ -248,10 +282,15 @@ class Runner:
         job["status"] = status
         job["error"] = message
         self.store.save(job)
-        final = {NEEDS_REVIEW: ("done", "ผลงานพร้อมให้ตรวจ"), QUEUED: ("warn", message or ""),
-                 CANCELLED: ("warn", message or ""), FAILED: ("error", message or "")}[status]
-        self._step(job_id, run_no, *final)
+        level, text = {NEEDS_REVIEW: ("ok", "ผลงานพร้อมให้ตรวจ"), QUEUED: ("warn", message or ""),
+                       CANCELLED: ("warn", message or ""), FAILED: ("error", message or "")}[status]
+        step = {"run": run_no, "kind": "status", "level": level, "text": text}
+        usage = meta.usage_summary()
+        if status == NEEDS_REVIEW and usage.get("duration_ms"):
+            step["detail"] = f"{usage.get('num_turns') or '?'} turns · {round(usage['duration_ms'] / 1000)} วินาที"
+        self.store.append_step(job_id, step)
         self.last_step.pop(job_id, None)
+        self.partial.pop(job_id, None)
 
     @staticmethod
     def _check_outputs(job_dir, job_type: JobType) -> list[str]:
@@ -304,16 +343,20 @@ class Runner:
         return self.store.update(job_id, status=QUEUED, session_id=None, error=None, not_before=None,
                                  quota_waits=0, pending_feedback=None)
 
-    def revise(self, job_id: str, feedback: str) -> dict:
+    def send_message(self, job_id: str, message: str) -> dict:
+        """Talk to Claude again in the same job: ask a follow-up, request changes, or continue after a failure.
+        Claude resumes its earlier session, so it remembers the files and the conversation."""
         job = self.store.get(job_id)
         if job is None:
             raise KeyError(job_id)
-        if job["status"] not in (NEEDS_REVIEW, FAILED):
-            raise ValueError("ขอแก้ไขได้เฉพาะงานที่รอตรวจหรือไม่สำเร็จ")
-        if not feedback.strip():
-            raise ValueError("กรุณาระบุสิ่งที่ต้องการให้แก้")
-        return self.store.update(job_id, status=QUEUED, pending_feedback=feedback.strip(), error=None,
+        if job["status"] not in MESSAGE_STATUSES:
+            raise ValueError("ส่งข้อความได้เมื่อ Claude ทำรอบปัจจุบันเสร็จแล้ว")
+        if not message.strip():
+            raise ValueError("พิมพ์ข้อความก่อนส่ง")
+        return self.store.update(job_id, status=QUEUED, pending_feedback=message.strip(), error=None,
                                  not_before=None, quota_waits=0)
+
+    revise = send_message
 
     # -- worker loop ---------------------------------------------------------
     def recover(self) -> None:

@@ -41,13 +41,14 @@ def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[
     outputs = [f"- {o}" for o in job_type.outputs]
     if feedback and resumed:
         return "\n".join([
-            "ผู้ใช้ตรวจงานที่คุณทำไว้แล้ว และขอให้แก้ไขดังนี้:",
+            "ข้อความใหม่จากผู้ใช้:",
             feedback.strip(),
             "",
-            "แก้ไฟล์ใน output/ ตามคำขอ (ไฟล์ผลลัพธ์ที่ต้องมีครบ):",
+            "ถ้าเป็นคำถาม ให้ตอบได้เลย ถ้าเป็นคำขอให้แก้หรือทำเพิ่ม ให้ทำในโฟลเดอร์ output/",
+            "โดยไฟล์ผลลัพธ์หลักต้องยังอยู่ครบ:",
             *outputs,
             "",
-            "เสร็จแล้วตอบสั้น ๆ ว่าแก้อะไรไปบ้าง",
+            "ตอบกลับสั้น ๆ ว่าทำอะไรไป หรือคำตอบของคำถาม",
         ])
 
     lines = [
@@ -65,6 +66,6 @@ def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[
     if job.get("instructions"):
         lines += ["", "คำสั่ง / คำถามจากผู้ใช้:", job["instructions"]]
     if feedback:
-        lines += ["", "ข้อแก้ไขจากผู้ใช้ (จากการตรวจรอบก่อน):", feedback.strip()]
+        lines += ["", "ข้อความเพิ่มเติมจากผู้ใช้ (หลังรอบก่อนหน้า):", feedback.strip()]
     lines += ["", "ไฟล์ผลลัพธ์ที่ต้องสร้าง:", *outputs]
     return "\n".join(lines)

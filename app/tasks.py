@@ -22,6 +22,10 @@ def _clean_due(value) -> str | None:
     return None
 
 
+def _norm(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
 def _text(value, limit: int = 500) -> str:
     return str(value).strip()[:limit] if value not in (None, "") else ""
 
@@ -45,12 +49,17 @@ class TaskStore:
         return self.all(include_done=False)
 
     def add_from_meeting(self, job: dict, raw_items: list) -> int:
-        """Add the action items Claude extracted; ignore malformed entries instead of failing the approval."""
+        """Add the action items Claude extracted; ignore malformed entries instead of failing the approval.
+
+        Approving the same meeting again (after a follow-up message) replaces its open items, and skips
+        items you already ticked off, so nothing is duplicated."""
         with self._lock:
             data = self._load()
+            data["items"] = [i for i in data["items"] if not (i.get("source_job") == job["id"] and i.get("status") != "done")]
+            done_texts = {_norm(i["task"]) for i in data["items"] if i.get("source_job") == job["id"]}
             added = 0
             for raw in raw_items if isinstance(raw_items, list) else []:
-                if not isinstance(raw, dict) or not _text(raw.get("task")):
+                if not isinstance(raw, dict) or not _text(raw.get("task")) or _norm(_text(raw.get("task"))) in done_texts:
                     continue
                 priority = _text(raw.get("priority")).lower()
                 data["items"].append({

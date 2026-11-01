@@ -1,47 +1,61 @@
 "use strict";
 
-// ---------- helpers ----------
+/* ---------------------------------------------------------------- helpers */
 const $ = (sel, el = document) => el.querySelector(sel);
+const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const icon = (name, cls = "") => `<svg class="icon ${cls}" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 
+const TYPE_ICON = { "meeting-summary": "meeting", "follow-up": "clock", "sales-brief": "users",
+  "proposal-draft": "briefcase", "eng-qa": "setsquare", general: "message" };
 const STATUS = {
   queued: ["รอคิว", "queued"],
   running: ["กำลังทำ", "running"],
   needs_review: ["รอตรวจ", "review"],
-  done: ["เสร็จแล้ว", "done"],
+  done: ["อนุมัติแล้ว", "done"],
   failed: ["ไม่สำเร็จ", "failed"],
-  cancelled: ["ยกเลิก", "cancelled"],
+  cancelled: ["ยกเลิกแล้ว", "cancelled"],
 };
-const SOURCES = { dashboard: "สร้างจากหน้าเว็บ", inbox: "จากโฟลเดอร์ inbox", schedule: "ตั้งเวลาอัตโนมัติ" };
-const STEP_ICONS = { start: "🚀", text: "💬", tool: "🔧", warn: "⚠️", error: "❌", done: "✅", app: "⚙️", stderr: "🖥️" };
-const DAYS = { mon: "จ.", tue: "อ.", wed: "พ.", thu: "พฤ.", fri: "ศ.", sat: "ส.", sun: "อา." };
+const SOURCES = { dashboard: "สั่งจากหน้าเว็บ", inbox: "จากโฟลเดอร์ inbox", schedule: "ระบบสร้างตามเวลา" };
 const PRIORITY = { high: "สูง", medium: "กลาง", low: "ต่ำ" };
+const DAYS = { mon: "จ.", tue: "อ.", wed: "พ.", thu: "พฤ.", fri: "ศ.", sat: "ส.", sun: "อา." };
 const QUOTA_WINDOWS = { five_hour: "รอบ 5 ชม.", seven_day: "รายสัปดาห์", seven_day_opus: "รายสัปดาห์ (Opus)", seven_day_sonnet: "รายสัปดาห์ (Sonnet)" };
+const PLACEHOLDERS = {
+  general: "เช่น สรุปไฟล์แนบเป็นข้อ ๆ, ร่างอีเมลตอบลูกค้า, เปรียบเทียบ spec สองรุ่น",
+  "meeting-summary": "แนบ transcript แล้วบอกเพิ่มได้ เช่น เน้นประเด็นงบประมาณ",
+  "follow-up": "ไม่ต้องพิมพ์ก็ได้ Claude จะไล่ action item ที่ยังเปิดอยู่และร่างข้อความทวงงานให้",
+  "sales-brief": "วัตถุประสงค์ของการพบ เช่น นำเสนอการ upgrade ตู้ MDB",
+  "proposal-draft": "requirement ของลูกค้า เช่น feeder 125A 2 ชุด ส่งมอบภายใน 30 วัน",
+  "eng-qa": "คำถามหรือโจทย์ เช่น เลือกขนาดสาย CV สำหรับมอเตอร์ 75 kW 400V ระยะ 80 m",
+};
 
 let viewToken = 0; // bumps on every navigation so polling loops of the old view stop
 let lastStatus = null;
+let jobTypesCache = null;
 
 async function api(path, options = {}) {
   const res = await fetch(path, options);
   const isJson = (res.headers.get("content-type") || "").includes("application/json");
   const body = isJson ? await res.json() : await res.text();
-  if (!res.ok) throw new Error((body && body.detail) || res.statusText || "เกิดข้อผิดพลาด");
+  if (!res.ok) throw new Error((body && body.detail) || res.statusText || "เกิดข้อผิดพลาด ลองใหม่อีกครั้ง");
   return body;
 }
 const postJSON = (path, data = {}) =>
   api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+const getJobTypes = async () => (jobTypesCache ||= await api("/api/job-types"));
 
-function toast(message) {
+function toast(message, kind = "") {
   const el = document.createElement("div");
-  el.className = "toast";
+  el.className = `toast ${kind}`;
   el.textContent = message;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3500);
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.classList.add("out"), 3600);
+  setTimeout(() => el.remove(), 4000);
 }
 
-const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" }) : "");
-const fmtClock = (iso) => (iso ? new Date(iso).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "");
-const fmtDate = (d) => (d ? new Date(`${d}T00:00:00`).toLocaleDateString("th-TH", { dateStyle: "medium" }) : "—");
+const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
+const fmtClock = (iso) => (iso ? new Date(iso).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "");
+const fmtDate = (d) => (d ? new Date(`${d}T00:00:00`).toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "numeric" }) : "—");
 function fmtDuration(start, end) {
   if (!start) return "";
   const s = Math.max(0, Math.round(((end ? new Date(end) : new Date()) - new Date(start)) / 1000));
@@ -51,7 +65,7 @@ function fmtDuration(start, end) {
 }
 function badge(status) {
   const [label, cls] = STATUS[status] || [status, "queued"];
-  return `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
+  return `<span class="badge s-${cls}">${esc(label)}</span>`;
 }
 const fileUrl = (jobId, area, path, raw = false) =>
   `/api/jobs/${encodeURIComponent(jobId)}/files/${area}/${path.split("/").map(encodeURIComponent).join("/")}${raw ? "?raw=1" : ""}`;
@@ -71,7 +85,16 @@ function poll(fn) {
   tick();
 }
 
-// ---------- minimal, safe markdown (input is escaped first) ----------
+function autoGrow(textarea) {
+  const fit = () => {
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 320)}px`;
+  };
+  textarea.addEventListener("input", fit);
+  fit();
+}
+
+/* ----------------------------------------- minimal, safe markdown (escaped first) */
 function renderMarkdown(md) {
   const lines = String(md).replace(/\r\n/g, "\n").split("\n");
   let html = "";
@@ -161,175 +184,368 @@ function renderMarkdown(md) {
   return html;
 }
 
-// ---------- header chips ----------
-function renderChips(s) {
-  const chips = [];
+/* ---------------------------------------------------------------- status bar */
+function renderStatus(s) {
+  const items = [];
   const c = s.claude;
   if (!c) {
-    chips.push(`<span class="chip"><span class="dot"></span>กำลังตรวจสอบ Claude…</span>`);
+    items.push(`<span class="pill">กำลังตรวจสอบ Claude…</span>`);
   } else if (c.logged_in && c.provider === "fake-claude") {
-    chips.push(`<span class="chip warn" title="CLAUDE_BIN ชี้ไปที่ fake-claude"><span class="dot"></span>โหมดสาธิต · ยังไม่ได้ใช้ Claude จริง</span>`);
+    items.push(`<span class="pill warn" title="CLAUDE_BIN ชี้ไปที่ fake-claude"><i class="dot"></i>โหมดสาธิต · ยังไม่ได้ใช้ Claude จริง</span>`);
   } else if (c.logged_in) {
     const apiLike = /api|console/i.test(String(c.method || ""));
     const title = `Claude Code ${c.version || ""} · ${c.method || ""} · ตรวจเมื่อ ${fmtTime(c.checked_at)}`;
-    chips.push(`<span class="chip ${apiLike ? "warn" : "ok"}" title="${esc(title)}"><span class="dot"></span>${
-      apiLike ? "Claude พร้อม · ใช้ API key (ไม่ใช่ subscription)" : "Claude พร้อม · subscription"}</span>`);
+    items.push(`<span class="pill ${apiLike ? "warn" : "ok"}" title="${esc(title)}"><i class="dot"></i>${
+      apiLike ? "ใช้ API key อยู่ ไม่ใช่ subscription" : "Claude พร้อม"}</span>`);
   } else {
-    chips.push(`<span class="chip bad" data-action="login-help" title="${esc(c.error || "")}"><span class="dot"></span>${
-      c.installed ? "Claude ยังไม่ได้ล็อกอิน" : "ไม่พบ Claude Code"} · ดูวิธีแก้</span>`);
+    items.push(`<a class="pill bad" href="#/" title="${esc(c.error || "")}"><i class="dot"></i>${
+      c.installed ? "Claude ยังไม่ได้ล็อกอิน" : "ไม่พบ Claude Code"} · ดูวิธีเชื่อม</a>`);
   }
   const q = s.quota;
   if (q && q.status) {
     const reset = q.resetsAt ? new Date(q.resetsAt > 1e12 ? q.resetsAt : q.resetsAt * 1000) : null;
     const active = !reset || reset > new Date();
     const sameDay = reset && reset.toDateString() === new Date().toDateString();
-    const when = reset && (sameDay
-      ? reset.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })
-      : reset.toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }));
-    const resetText = when ? ` · รีเซ็ต ${when}` : "";
-    const windowName = QUOTA_WINDOWS[q.rateLimitType] ? ` ${QUOTA_WINDOWS[q.rateLimitType]}` : "";
+    const when = reset && (sameDay ? fmtClock(reset.toISOString()) : fmtTime(reset.toISOString()));
+    const win = QUOTA_WINDOWS[q.rateLimitType] ? ` ${QUOTA_WINDOWS[q.rateLimitType]}` : "";
     const pct = typeof q.utilization === "number" ? ` ${Math.round(q.utilization <= 1 ? q.utilization * 100 : q.utilization)}%` : "";
-    if (q.status === "rejected" && active) chips.push(`<span class="chip bad"><span class="dot"></span>โควต้า${windowName}เต็ม${resetText}</span>`);
-    else if (q.status === "allowed_warning" && active) chips.push(`<span class="chip warn"><span class="dot"></span>โควต้า${windowName}ใกล้เต็ม${pct}${resetText}</span>`);
-    else chips.push(`<span class="chip ok"><span class="dot"></span>โควต้าปกติ</span>`);
+    if (q.status === "rejected" && active) items.push(`<span class="pill bad"><i class="dot"></i>โควต้า${win}เต็ม${when ? ` · รีเซ็ต ${when}` : ""}</span>`);
+    else if (q.status === "allowed_warning" && active) items.push(`<span class="pill warn" title="${esc(when ? `รีเซ็ต ${when}` : "")}"><i class="dot"></i>โควต้า${win}ใช้ไป${pct}</span>`);
+    else items.push(`<span class="pill ok"><i class="dot"></i>โควต้าปกติ</span>`);
   }
   const n = s.counts || {};
-  chips.push(`<span class="chip"><span class="dot"></span>กำลังทำ ${s.worker.active.length}/${s.worker.max} · คิว ${n.queued || 0} · รอตรวจ ${n.needs_review || 0}</span>`);
-  $("#chips").innerHTML = chips.join("");
+  const busy = s.worker.active.length;
+  if (busy || n.queued) {
+    items.push(`<span class="pill ${busy ? "live" : ""}">${busy ? `<i class="dot"></i>กำลังทำ ${busy} งาน` : "ยังไม่เริ่ม"}${n.queued ? ` · คิว ${n.queued}` : ""}</span>`);
+  }
+  $("#status").innerHTML = items.join("");
 }
 
-async function refreshStatus() {
+const SEND_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ + Enter" : "Ctrl + Enter";
+
+async function refreshStatus(reschedule = true) {
   try {
     lastStatus = await api("/api/status");
-    renderChips(lastStatus);
+    renderStatus(lastStatus);
+    renderSetup(lastStatus.claude);
     $("#taskCount").textContent = lastStatus.open_tasks || "";
   } catch (err) {
-    $("#chips").innerHTML = `<span class="chip bad"><span class="dot"></span>ติดต่อ NAS ไม่ได้</span>`;
+    $("#status").innerHTML = `<span class="pill bad"><i class="dot"></i>ติดต่อ NAS ไม่ได้ กำลังลองใหม่</span>`;
   }
-  setTimeout(refreshStatus, 5000);
+  if (reschedule) setTimeout(refreshStatus, 5000);
 }
 
-document.addEventListener("click", (e) => {
-  if (e.target.closest("[data-action=login-help]")) $("#loginHelp").showModal();
-});
-$("#recheckClaude").addEventListener("click", async () => {
-  try {
-    const c = await postJSON("/api/claude/check");
-    toast(c.logged_in ? "เชื่อมต่อ Claude ได้แล้ว" : "ยังไม่ได้ล็อกอิน: " + (c.error || "ลองใหม่อีกครั้ง"));
-    if (lastStatus) renderChips({ ...lastStatus, claude: c });
-  } catch (err) {
-    toast(err.message);
-  }
-});
-
-// ---------- jobs list ----------
-let jobFilter = "";
-const FILTERS = [["", "ทั้งหมด"], ["running", "กำลังทำ"], ["queued", "รอคิว"], ["needs_review", "รอตรวจ"], ["done", "เสร็จแล้ว"], ["failed", "ไม่สำเร็จ"]];
-
-function showJobs() {
-  $("#view").innerHTML = `
-    <div class="filters">${FILTERS.map(([v, l]) => `<button data-f="${v}" class="${v === jobFilter ? "active" : ""}">${l}</button>`).join("")}</div>
-    <div id="jobList" class="list"><p class="muted">กำลังโหลด…</p></div>`;
-  $("#view .filters").addEventListener("click", (e) => {
-    const b = e.target.closest("button");
-    if (!b) return;
-    jobFilter = b.dataset.f;
-    route();
+/* Claude not connected: an inline panel on the home page, not a modal */
+function renderSetup(claude) {
+  const el = $("#setup");
+  if (!el) return;
+  const needed = claude && !claude.logged_in;
+  el.hidden = !needed;
+  if (!needed || el.dataset.ready) return;
+  el.dataset.ready = "1";
+  el.innerHTML = `
+    <h2>${icon("alert")}${claude.installed ? "ยังไม่ได้เชื่อม Claude subscription" : "ไม่พบ Claude Code ใน container"}</h2>
+    <p>งานที่สั่งจะรอในคิวจนกว่าจะเชื่อมเสร็จ ทำวิธีใดวิธีหนึ่ง แล้วกดตรวจสอบอีกครั้ง</p>
+    <ol>
+      <li><strong>ล็อกอินใน container</strong> (แนะนำ): เปิด Terminal ของ container ใน Container Manager หรือ SSH เข้า NAS แล้วรัน
+        <pre>sudo docker exec -it ai-work-assistant claude auth login</pre>
+        เปิดลิงก์ที่ขึ้นมาในเบราว์เซอร์ ล็อกอิน แล้วนำรหัสที่ได้มาวางใน terminal</li>
+      <li><strong>ใช้ token อายุ 1 ปี</strong>: บนเครื่องที่มี Claude Code รัน <code>claude setup-token</code>
+        แล้วใส่ค่าที่ได้ใน <code>CLAUDE_CODE_OAUTH_TOKEN</code> ของไฟล์ <code>.env</code> จากนั้นสั่ง Build project ใหม่</li>
+    </ol>
+    <p class="small">หน้าเว็บนี้ไม่ขอและไม่เก็บรหัสผ่านหรือ token ของ Claude</p>
+    <button type="button" class="btn" id="recheckClaude">${icon("retry")}ตรวจสอบการเชื่อมต่ออีกครั้ง</button>`;
+  $("#recheckClaude").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const c = await postJSON("/api/claude/check");
+      toast(c.logged_in ? "เชื่อมต่อ Claude ได้แล้ว" : `ยังเชื่อมไม่ได้: ${c.error || "ทำตามขั้นตอนแล้วลองตรวจอีกครั้ง"}`, c.logged_in ? "" : "bad");
+      if (lastStatus) renderStatus({ ...lastStatus, claude: c });
+      el.dataset.ready = "";
+      renderSetup(c);
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+    btn.disabled = false;
   });
+}
+
+/* ---------------------------------------------------------------- home: composer + job lists */
+let showAllRecent = false;
+
+async function showHome() {
+  const types = await getJobTypes();
+  $("#view").innerHTML = `
+    <section class="setup" id="setup" hidden aria-live="polite"></section>
+    <section class="compose" aria-labelledby="composeTitle">
+      <h1 id="composeTitle">สั่งงาน Claude</h1>
+      <p class="lede">พิมพ์สิ่งที่อยากให้ทำ แนบไฟล์ได้ Claude ทำงานบน cloud ด้วย subscription ของคุณ แล้วส่งผลกลับมาให้ตรวจที่นี่</p>
+      <form id="composer" class="composer" novalidate>
+        <fieldset class="type-picker">
+          <legend class="sr-only">ชนิดงาน</legend>
+          ${types.map((t) => `
+            <label class="type-option">
+              <input type="radio" name="type" value="${esc(t.id)}" ${t.id === "general" ? "checked" : ""}>
+              <span>${icon(TYPE_ICON[t.id] || "message")}${esc(t.label)}</span>
+            </label>`).join("")}
+        </fieldset>
+        <p class="type-desc" id="typeDesc"></p>
+        <div class="customer" id="customerField" hidden>
+          <label for="cCustomer">ชื่อลูกค้า</label>
+          <input id="cCustomer" type="text" autocomplete="off" placeholder="เช่น ACME (ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/)" oninput="this.removeAttribute('aria-invalid')">
+        </div>
+        <textarea id="cMessage" rows="3" aria-labelledby="composeTitle"></textarea>
+        <ul class="attachments" id="cFiles"></ul>
+        <div class="composer-bar">
+          <button type="button" class="btn quiet" id="cAttach">${icon("paperclip")}แนบไฟล์</button>
+          <input type="file" id="cFileInput" multiple hidden>
+          <span class="hint" id="cHint"></span>
+          <button type="submit" class="btn primary" id="cSend">ส่งให้ Claude${icon("arrow-up")}</button>
+        </div>
+      </form>
+    </section>
+    <div id="lists" class="lists" aria-busy="true">${skeletonRows()}</div>`;
+  if (lastStatus) renderSetup(lastStatus.claude);
+
+  const form = $("#composer");
+  const message = $("#cMessage");
+  const files = [];
+  autoGrow(message);
+  const currentType = () => types.find((t) => t.id === form.elements.type.value);
+  const renderFiles = () => {
+    $("#cFiles").innerHTML = files.map((f, i) => `<li>${icon("file")}<span>${esc(f.name)}</span>
+      <button type="button" class="icon-btn" data-remove="${i}" aria-label="เอาไฟล์ ${esc(f.name)} ออก">${icon("x")}</button></li>`).join("");
+  };
+  const syncType = () => {
+    const t = currentType();
+    message.placeholder = PLACEHOLDERS[t.id] || "";
+    $("#typeDesc").textContent = t.description;
+    $("#customerField").hidden = !t.fields.some((f) => f.name === "customer");
+    const needsFiles = t.fields.some((f) => f.kind === "files" && f.required);
+    $("#cHint").textContent = needsFiles ? "งานนี้ต้องแนบไฟล์ transcript" : `${SEND_KEY} เพื่อส่ง`;
+  };
+  form.addEventListener("change", (e) => { if (e.target.name === "type") syncType(); });
+  syncType();
+
+  $("#cAttach").onclick = () => $("#cFileInput").click();
+  $("#cFileInput").onchange = (e) => {
+    files.push(...e.target.files);
+    e.target.value = "";
+    renderFiles();
+  };
+  $("#cFiles").onclick = (e) => {
+    const b = e.target.closest("[data-remove]");
+    if (!b) return;
+    files.splice(Number(b.dataset.remove), 1);
+    renderFiles();
+  };
+  form.addEventListener("dragover", (e) => { e.preventDefault(); form.classList.add("dropping"); });
+  form.addEventListener("dragleave", () => form.classList.remove("dropping"));
+  form.addEventListener("drop", (e) => {
+    e.preventDefault();
+    form.classList.remove("dropping");
+    files.push(...e.dataTransfer.files);
+    renderFiles();
+  });
+  message.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) form.requestSubmit();
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const t = currentType();
+    const text = message.value.trim();
+    const customer = $("#cCustomer").value.trim();
+    for (const f of t.fields) {
+      const missing = f.kind === "files" ? !files.length : f.name === "customer" ? !customer : f.name === "instructions" ? !text : false;
+      if (f.required && missing) {
+        toast(f.kind === "files" ? "งานนี้ต้องแนบไฟล์ก่อนส่ง" : `ใส่${f.label}ก่อนส่ง`, "bad");
+        const target = f.name === "customer" ? $("#cCustomer") : f.kind === "files" ? $("#cAttach") : message;
+        if (target.tagName === "INPUT") target.setAttribute("aria-invalid", "true");
+        target.focus();
+        return;
+      }
+    }
+    const firstLine = text.split("\n")[0].slice(0, 90);
+    const stem = files[0] ? files[0].name.replace(/\.[^.]+$/, "") : "";
+    const byType = {
+      general: firstLine || stem,
+      "meeting-summary": stem || firstLine,
+      "sales-brief": customer ? `${t.label} ${customer}` : firstLine,
+      "proposal-draft": customer ? `${t.label} ${customer}` : firstLine,
+      "eng-qa": firstLine || stem,
+      "follow-up": `${t.label} ${new Date().toLocaleDateString("th-TH", { day: "numeric", month: "short" })}`,
+    };
+    const title = byType[t.id] || firstLine || stem || t.label;
+    const fd = new FormData();
+    fd.append("type", t.id);
+    fd.append("title", title);
+    fd.append("instructions", text);
+    fd.append("customer", customer);
+    files.forEach((f) => fd.append("files", f, f.name));
+    const send = $("#cSend");
+    send.disabled = true;
+    send.classList.add("busy");
+    try {
+      const job = await api("/api/jobs", { method: "POST", body: fd });
+      location.hash = `#/job/${encodeURIComponent(job.id)}`;
+    } catch (err) {
+      toast(err.message, "bad");
+      send.disabled = false;
+      send.classList.remove("busy");
+    }
+  });
+
   poll(async () => {
-    const jobs = await api(`/api/jobs${jobFilter ? `?status=${jobFilter}` : ""}`);
-    renderJobList(jobs);
+    const jobs = await api("/api/jobs");
+    renderLists(jobs);
     return jobs.some((j) => j.status === "running" || j.status === "queued") ? 2000 : 6000;
   });
 }
 
-function renderJobList(jobs) {
-  const el = $("#jobList");
-  if (!el) return;
-  if (!jobs.length) {
-    el.innerHTML = `<div class="empty panel">ยังไม่มีงาน${jobFilter ? "ในสถานะนี้" : ""}<br><br>
-      <a class="btn primary" href="#/new">➕ สร้างงาน</a>
-      <p class="small">หรือวางไฟล์ transcript ลงโฟลเดอร์ <code>inbox/meeting</code> บน NAS แล้วระบบจะสร้างงานสรุปประชุมให้เอง</p></div>`;
-    return;
-  }
-  el.innerHTML = jobs
-    .map((j) => {
-      let extra = "";
-      if (j.status === "running" && j.last_step) extra = `<div class="live">⏳ ${esc(j.last_step)}</div>`;
-      else if (j.status === "queued" && j.not_before) extra = `<div class="live">รอโควต้าถึง ${esc(fmtTime(j.not_before))}</div>`;
-      else if ((j.status === "failed" || j.status === "cancelled") && j.error) extra = `<div class="err">${esc(j.error)}</div>`;
-      const took = j.started_at ? ` · ใช้เวลา ${fmtDuration(j.started_at, j.status === "running" ? null : j.ended_at)}` : "";
-      return `<a class="job" href="#/job/${encodeURIComponent(j.id)}">
-        <span class="icon">${j.icon}</span>
-        <div><div class="title">${esc(j.title)}</div>
-          <div class="meta">${esc(j.type_label)} · ${esc(fmtTime(j.created_at))} · ${esc(SOURCES[j.source] || j.source)}${took}</div>${extra}</div>
-        ${badge(j.status)}</a>`;
-    })
-    .join("");
+function skeletonRows(n = 4) {
+  return `<span class="sr-only">กำลังโหลดรายการงาน</span><ul class="skeleton" aria-hidden="true">${
+    "<li><span></span><span></span><span></span></li>".repeat(n)}</ul>`;
 }
 
-// ---------- job detail ----------
+function jobRow(j) {
+  let extra = "";
+  if (j.status === "running" && j.last_step) extra = `<span class="job-live">${esc(j.last_step)}</span>`;
+  else if (j.status === "queued" && j.not_before) extra = `<span class="job-live">รอโควต้าถึง ${esc(fmtTime(j.not_before))}</span>`;
+  else if ((j.status === "failed" || j.status === "cancelled") && j.error) extra = `<span class="job-error">${esc(j.error)}</span>`;
+  const took = j.started_at ? ` · ${fmtDuration(j.started_at, j.status === "running" ? null : j.ended_at)}` : "";
+  return `<li><a class="job" href="#/job/${encodeURIComponent(j.id)}">
+      <span class="job-icon">${icon(TYPE_ICON[j.type] || "message")}</span>
+      <span class="job-body">
+        <span class="job-title">${esc(j.title)}</span>
+        <span class="job-meta">${esc(j.type_label)} · ${esc(fmtTime(j.created_at))}${j.source !== "dashboard" ? ` · ${esc(SOURCES[j.source] || j.source)}` : ""}${took}</span>
+        ${extra}
+      </span>
+      ${badge(j.status)}
+    </a></li>`;
+}
+
+function renderLists(jobs) {
+  const el = $("#lists");
+  if (!el) return;
+  el.removeAttribute("aria-busy");
+  if (!jobs.length) {
+    el.innerHTML = `<div class="empty">
+      <h2>ยังไม่มีงาน</h2>
+      <p>พิมพ์สั่งงานในกล่องด้านบนได้เลย หรือวางไฟล์ transcript ลงโฟลเดอร์ <code>inbox/meeting</code> บน NAS แล้วระบบจะสร้างงานสรุปประชุมให้เอง</p>
+    </div>`;
+    return;
+  }
+  const review = jobs.filter((j) => j.status === "needs_review");
+  const active = jobs.filter((j) => j.status === "running" || j.status === "queued");
+  const recent = jobs.filter((j) => !review.includes(j) && !active.includes(j));
+  const shown = showAllRecent ? recent : recent.slice(0, 12);
+  const section = (title, list, note = "") => (list.length ? `
+    <section class="group" aria-label="${esc(title)}">
+      <h2>${esc(title)} <span class="group-count">${list.length}</span></h2>${note}
+      <ul class="job-list">${list.map(jobRow).join("")}</ul>
+    </section>` : "");
+  el.innerHTML =
+    section("รอคุณตรวจ", review, `<p class="group-note">อ่านผลงานแล้วกดอนุมัติ หรือพิมพ์บอก Claude ให้แก้</p>`) +
+    section("กำลังทำ", active) +
+    section("ล่าสุด", shown) +
+    (recent.length > shown.length ? `<button type="button" class="btn quiet more" id="showAll">ดูงานทั้งหมด (${recent.length})</button>` : "");
+  const more = $("#showAll");
+  if (more) more.onclick = () => { showAllRecent = true; renderLists(jobs); };
+}
+
+/* ---------------------------------------------------------------- job: conversation + output */
 function showJob(id) {
   $("#view").innerHTML = `
-    <a class="back" href="#/">← งานทั้งหมด</a>
-    <div id="jobHead" class="panel"><p class="muted">กำลังโหลด…</p></div>
-    <div class="grid2">
-      <section class="panel"><h2>ความคืบหน้า (สดจาก Claude)</h2>
-        <ul id="timeline" class="timeline"><li class="run-sep" data-placeholder>ยังไม่เริ่ม — งานอยู่ในคิว</li></ul>
-        <div id="working"></div></section>
-      <section>
-        <div class="panel"><h2>ผลลัพธ์</h2><div id="outTabs" class="filetabs"></div>
-          <div id="outView" class="doc"><p class="muted">ยังไม่มีไฟล์ผลลัพธ์</p></div></div>
-        <div class="panel"><h2>ไฟล์ input และข้อมูลประกอบ</h2><div id="inFiles"></div></div>
+    <a class="back" href="#/">${icon("chevron-left")}งานทั้งหมด</a>
+    <header class="job-head" id="jobHead" aria-busy="true">${skeletonRows(1)}</header>
+    <div class="job-grid">
+      <section class="convo" aria-label="บทสนทนากับ Claude">
+        <ol class="thread" id="thread"></ol>
+        <div class="live" id="live" aria-live="polite"></div>
+        <label for="replyText" class="reply-label">ข้อความถึง Claude</label>
+        <form class="reply" id="reply" novalidate>
+          <textarea id="replyText" rows="2"></textarea>
+          <button type="submit" class="btn primary" id="replySend" aria-label="ส่งข้อความ">${icon("arrow-up")}</button>
+        </form>
+        <p class="reply-hint" id="replyHint"></p>
+      </section>
+      <section class="output" aria-labelledby="outTitle">
+        <div class="output-head"><h2 id="outTitle">ผลลัพธ์</h2><div class="tabs" id="outTabs" role="tablist"></div></div>
+        <div class="sheet" id="outView"><div class="doc"><p class="muted">ไฟล์ผลลัพธ์จะแสดงที่นี่เมื่อ Claude เขียนเสร็จ</p></div></div>
+        <div class="files" id="inFiles"></div>
       </section>
     </div>`;
+
+  const steps = [];
+  const openGroups = new Set();
   let after = 0;
-  let lastRun = null;
   let headSig = "";
   let filesSig = "";
   let selected = null;
   let selectedSig = "";
+  let job = null;
+  let rendered = false;
+
+  const reply = $("#reply");
+  const replyText = $("#replyText");
+  autoGrow(replyText);
+  replyText.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) reply.requestSubmit();
+  });
+  reply.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = replyText.value.trim();
+    if (!text) return replyText.focus();
+    $("#replySend").disabled = true;
+    try {
+      await postJSON(`/api/jobs/${encodeURIComponent(id)}/messages`, { message: text });
+      replyText.value = "";
+      replyText.dispatchEvent(new Event("input"));
+      headSig = "";
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+    $("#replySend").disabled = false;
+  });
+  $("#thread").addEventListener("toggle", (e) => {
+    const key = e.target.dataset && e.target.dataset.group;
+    if (key) e.target.open ? openGroups.add(key) : openGroups.delete(key);
+  }, true);
 
   const selectOutput = (outputs, path) => {
     selected = path;
-    $("#outTabs").innerHTML = outputs
-      .map((f) => `<button data-path="${esc(f.path)}" class="${f.path === selected ? "active" : ""}">${esc(f.path)}</button>`)
-      .join("");
+    $("#outTabs").innerHTML = outputs.map((f) => `<button type="button" role="tab" aria-selected="${f.path === selected}"
+      data-path="${esc(f.path)}">${esc(f.path)}</button>`).join("");
     const cur = outputs.find((f) => f.path === selected);
     const sig = cur ? `${cur.modified}|${cur.size}` : "";
     if (cur && sig !== selectedSig) {
       selectedSig = sig;
-      loadOutput(id, cur.path);
+      loadOutput(id, cur, job);
     }
   };
 
   poll(async () => {
     const data = await api(`/api/jobs/${encodeURIComponent(id)}?after=${after}`);
-    const job = data.job;
+    job = data.job;
+    const running = job.status === "running" || job.status === "queued";
 
     const sig = `${job.status}|${job.updated_at}`;
     if (sig !== headSig) {
       headSig = sig;
+      $("#jobHead").removeAttribute("aria-busy");
       renderJobHead(job);
+      renderReplyState(job);
     }
 
-    const tl = $("#timeline");
     if (data.steps.length) {
-      const nearBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60;
-      tl.querySelector("[data-placeholder]")?.remove();
-      for (const st of data.steps) {
-        if (st.run !== lastRun) {
-          lastRun = st.run;
-          tl.insertAdjacentHTML("beforeend", `<li class="run-sep">— รอบที่ ${esc(st.run)} —</li>`);
-        }
-        tl.insertAdjacentHTML("beforeend", `<li class="k-${esc(st.kind)}"><span>${STEP_ICONS[st.kind] || "•"}</span>
-          <div><div class="body">${esc(st.text)}</div><div class="when">${esc(fmtClock(st.t))}</div></div></li>`);
-      }
-      if (nearBottom) tl.scrollTop = tl.scrollHeight;
+      steps.push(...data.steps);
+      renderThread(steps, job, openGroups, rendered && running);
+      rendered = true;
     }
     after = data.next;
-    $("#working").innerHTML = job.status === "running"
-      ? `<div class="working"><span class="spinner"></span>Claude กำลังทำงาน… ${esc(fmtDuration(job.started_at))}</div>` : "";
+    renderLive(job, data.partial_text, steps);
 
     const order = ((data.type && data.type.outputs) || []).map((o) => o.replace(/^output\//, ""));
     const rank = (p) => (order.includes(p) ? order.indexOf(p) : 99);
@@ -344,10 +560,93 @@ function showJob(id) {
         };
         selectOutput(outputs, outputs.some((f) => f.path === selected) ? selected : outputs[0].path);
       }
-      renderInputs(id, data.files);
+      renderFiles(id, data.files);
     }
-    return job.status === "running" || job.status === "queued" ? 1500 : 8000;
+    return running ? 1200 : 8000;
   });
+}
+
+function renderThread(steps, job, openGroups, autoscroll = false) {
+  const thread = $("#thread");
+  const nearBottom = autoscroll && window.innerHeight + window.scrollY >= document.body.scrollHeight - 160;
+  const items = [];
+  let group = null;
+  steps.forEach((st, i) => {
+    if (st.kind === "user") {
+      group = null;
+      items.push(`<li class="msg user"><div class="bubble">${esc(st.text).replace(/\n/g, "<br>")}${
+        st.files && st.files.length ? `<ul class="msg-files">${st.files.map((f) => `<li>${icon("file")}${esc(f)}</li>`).join("")}</ul>` : ""}</div>
+        <span class="msg-time">${esc(fmtClock(st.t))}</span></li>`);
+    } else if (st.kind === "text") {
+      group = null;
+      items.push(`<li class="msg claude"><span class="who">Claude</span><div class="bubble doc-inline">${renderMarkdown(st.text)}</div>
+        <span class="msg-time">${esc(fmtClock(st.t))}</span></li>`);
+    } else if (st.kind === "status") {
+      group = null;
+      const ic = st.level === "ok" ? "check" : st.level === "error" ? "x" : "alert";
+      items.push(`<li class="status-line ${esc(st.level)}">${icon(ic)}${esc(st.text)}${
+        st.detail ? `<span class="status-detail">· ${esc(st.detail)}</span>` : ""}</li>`);
+    } else if (st.kind === "start" || st.kind === "result") {
+      // model shows in the header, timing on the status line
+    } else {
+      if (!group) {
+        group = { key: `${st.run}-${i}`, entries: [] };
+        items.push(group);
+      }
+      group.entries.push(st);
+    }
+  });
+  const lastGroup = items.filter((x) => typeof x !== "string").pop();
+  const running = job.status === "running";
+  thread.innerHTML = items.map((x) => {
+    if (typeof x === "string") return x;
+    const last = x.entries[x.entries.length - 1];
+    const live = running && x === lastGroup;
+    const open = openGroups.has(x.key) || live;
+    const warn = x.entries.some((e) => e.kind === "warn" || e.kind === "error");
+    return `<li class="activity${live ? " is-live" : ""}${warn ? " has-warn" : ""}">
+      <details data-group="${esc(x.key)}" ${open ? "open" : ""}>
+        <summary>${icon("tool")}<span class="activity-sum">${live ? "กำลังทำ" : "ทำไป"} ${x.entries.length} ขั้นตอน</span>
+          <span class="activity-last">${esc(last.text)}</span></summary>
+        <ol>${x.entries.map((e) => `<li class="k-${esc(e.kind)}"><span class="t">${esc(fmtClock(e.t))}</span><span>${esc(e.text)}</span></li>`).join("")}</ol>
+      </details></li>`;
+  }).join("");
+  if (nearBottom) window.scrollTo({ top: document.body.scrollHeight });
+}
+
+function renderLive(job, partial, steps) {
+  const live = $("#live");
+  if (!live) return;
+  if (job.status === "running" && partial) {
+    live.innerHTML = `<div class="msg claude typing"><span class="who">Claude กำลังพิมพ์</span>
+      <div class="bubble">${esc(partial).replace(/\n/g, "<br>")}<span class="caret" aria-hidden="true"></span></div></div>`;
+  } else if (job.status === "running") {
+    live.innerHTML = `<p class="working"><span class="spinner" aria-hidden="true"></span>Claude กำลังทำงาน · ${esc(fmtDuration(job.started_at))}</p>`;
+  } else if (job.status === "queued") {
+    live.innerHTML = job.not_before
+      ? `<p class="working wait">${icon("clock")}โควต้าเต็ม จะเริ่มเองเวลา ${esc(fmtTime(job.not_before))}</p>`
+      : `<p class="working wait">${icon("clock")}รอคิว Claude จะเริ่มเมื่อถึงคิว</p>`;
+  } else {
+    live.innerHTML = "";
+  }
+}
+
+function renderReplyState(job) {
+  const text = $("#replyText");
+  const send = $("#replySend");
+  const hints = {
+    needs_review: ["บอก Claude ว่าจะให้แก้หรือทำอะไรเพิ่ม…", "พอใจแล้วกด อนุมัติ ด้านบน หรือพิมพ์สั่งแก้ได้เลย Claude จำบริบทเดิมได้"],
+    done: ["ถามต่อ หรือสั่งงานต่อจากผลนี้…", "ถ้าส่งข้อความ งานนี้จะกลับไปรอตรวจอีกครั้ง"],
+    failed: ["บอก Claude ว่าจะให้ทำอย่างไรต่อ…", "หรือกด ลองใหม่ เพื่อเริ่มงานนี้ตั้งแต่ต้น"],
+    cancelled: ["บอก Claude ว่าจะให้ทำอย่างไรต่อ…", ""],
+    running: ["Claude กำลังทำงาน ส่งข้อความได้เมื่อรอบนี้เสร็จ", ""],
+    queued: ["รอคิวอยู่ ส่งข้อความได้เมื่อรอบนี้เสร็จ", ""],
+  };
+  const [placeholder, hint] = hints[job.status] || ["", ""];
+  text.placeholder = placeholder;
+  text.disabled = !job.can_message;
+  send.disabled = !job.can_message;
+  $("#replyHint").textContent = hint;
 }
 
 function renderJobHead(job) {
@@ -355,114 +654,98 @@ function renderJobHead(job) {
   const last = runs[runs.length - 1] || {};
   const usage = last.usage || {};
   const notices = [];
-  if (job.status === "queued" && job.not_before)
-    notices.push(`<div class="notice info">⏳ โควต้า subscription เต็ม ระบบจะเริ่มงานนี้เองเวลา ${esc(fmtTime(job.not_before))}</div>`);
-  else if (job.error) notices.push(`<div class="notice error">${esc(job.error)}</div>`);
-  if (job.warnings && job.warnings.length)
-    notices.push(`<div class="notice warn">${job.warnings.map((w) => `⚠️ ${esc(w)}`).join("<br>")}</div>`);
-  if (last.result && (job.status === "needs_review" || job.status === "done"))
-    notices.push(`<div class="notice info"><b>ข้อความจาก Claude:</b><br>${esc(last.result).replace(/\n/g, "<br>")}</div>`);
-  if (job.review) {
+  if (job.error && job.status !== "queued") notices.push(`<p class="notice error">${icon("alert")}<span>${esc(job.error)}</span></p>`);
+  if (job.warnings && job.warnings.length) notices.push(`<p class="notice warn">${icon("alert")}<span>${job.warnings.map(esc).join("<br>")}</span></p>`);
+  if (job.review && job.status === "done") {
     const r = job.review;
-    notices.push(`<div class="notice info">✅ อนุมัติเมื่อ ${esc(fmtTime(r.at))}${r.archived && r.archived.length ? ` · เก็บไว้ที่ <code>${r.archived.map(esc).join(", ")}</code>` : ""}${
-      r.tasks_added ? ` · เพิ่ม ${r.tasks_added} รายการเข้า <a href="#/tasks">ติดตามงาน</a>` : ""}</div>`);
+    notices.push(`<p class="notice ok">${icon("check")}<span>อนุมัติเมื่อ ${esc(fmtTime(r.at))}${
+      r.tasks_added ? ` · เพิ่ม ${r.tasks_added} รายการเข้า <a href="#/tasks">ติดตามงาน</a>` : ""}${
+      r.archived && r.archived.length ? `<br>เก็บไว้ที่ <code>${r.archived.map(esc).join(", ")}</code>` : ""}</span></p>`);
   }
   const meta = [
-    `สร้างเมื่อ ${fmtTime(job.created_at)}`,
-    SOURCES[job.source] || job.source,
-    job.params && job.params.customer ? `ลูกค้า: ${job.params.customer}` : "",
-    runs.length ? `ทำไปแล้ว ${runs.length} รอบ` : "",
-    last.model ? `model ${last.model}` : "",
+    job.type_label,
+    `สร้าง ${fmtTime(job.created_at)}`,
+    job.source !== "dashboard" ? SOURCES[job.source] || job.source : "",
+    job.params && job.params.customer ? `ลูกค้า ${job.params.customer}` : "",
+    runs.length > 1 ? `${runs.length} รอบ` : "",
+    last.model || "",
     usage.num_turns ? `${usage.num_turns} turns` : "",
-    last.started_at ? `ใช้เวลา ${fmtDuration(last.started_at, last.ended_at)}` : "",
-  ].filter(Boolean).map(esc).join(" · ");
+    last.started_at && last.ended_at ? `ใช้เวลา ${fmtDuration(last.started_at, last.ended_at)}` : "",
+  ].filter(Boolean).map(esc).join('<span class="sep">·</span>');
 
-  const buttons = [];
-  if (job.status === "needs_review") {
-    buttons.push(`<button class="btn good" data-act="approve">✅ อนุมัติ</button>`);
-    buttons.push(`<button class="btn" data-act="revise">✏️ ขอแก้ไข</button>`);
-  }
-  if (job.status === "failed") {
-    buttons.push(`<button class="btn primary" data-act="retry">🔁 ลองใหม่</button>`);
-    buttons.push(`<button class="btn" data-act="revise">✏️ สั่งแก้แล้วทำต่อ</button>`);
-  }
-  if (job.status === "cancelled") buttons.push(`<button class="btn primary" data-act="retry">🔁 ลองใหม่</button>`);
-  if (job.status === "queued" || job.status === "running") buttons.push(`<button class="btn danger" data-act="cancel">⏹ ยกเลิก</button>`);
+  const actions = [];
+  if (job.status === "needs_review") actions.push(`<button type="button" class="btn primary" data-act="approve">${icon("check")}อนุมัติผลงาน</button>`);
+  if (job.status === "failed" || job.status === "cancelled") actions.push(`<button type="button" class="btn" data-act="retry">${icon("retry")}ลองใหม่ตั้งแต่ต้น</button>`);
+  if (job.status === "queued" || job.status === "running") actions.push(`<button type="button" class="btn danger" data-act="ask-cancel">${icon("x")}ยกเลิกงาน</button>`);
 
   $("#jobHead").innerHTML = `
-    <div class="head">
-      <div><div class="row">${badge(job.status)}<span class="muted">${job.icon} ${esc(job.type_label)}</span></div>
-        <h2>${esc(job.title)}</h2><div class="muted small">${meta}</div></div>
-      <div class="row">${buttons.join("")}</div>
+    <div class="job-head-main">
+      <div class="title-row"><h1>${esc(job.title)}</h1>${badge(job.status)}</div>
+      <p class="job-meta">${meta}</p>
     </div>
-    ${job.instructions ? `<details class="small"><summary>คำสั่งที่ให้ไว้</summary><pre>${esc(job.instructions)}</pre></details>` : ""}
-    ${notices.join("")}
-    <div id="reviseBox"></div>`;
+    <div class="actions">${actions.join("")}</div>
+    ${notices.join("")}`;
 
-  $("#jobHead").querySelectorAll("[data-act]").forEach((btn) =>
-    btn.addEventListener("click", async () => {
-      const act = btn.dataset.act;
-      const base = `/api/jobs/${encodeURIComponent(job.id)}`;
-      try {
-        if (act === "revise") return showReviseBox(job);
-        if (act === "cancel" && !confirm("ยกเลิกงานนี้?")) return;
-        btn.disabled = true;
-        if (act === "approve") {
-          await postJSON(`${base}/approve`, { note: "" });
-          toast(job.type === "meeting-summary" ? "อนุมัติแล้ว · เพิ่ม action item เข้ารายการติดตามงาน" : "อนุมัติแล้ว · เก็บผลลัพธ์ไว้ใน library");
-        } else if (act === "cancel") {
-          await postJSON(`${base}/cancel`);
-          toast("กำลังยกเลิก…");
-        } else if (act === "retry") {
-          await postJSON(`${base}/retry`);
-          toast("ใส่กลับเข้าคิวแล้ว");
-        }
-        route();
-      } catch (err) {
-        btn.disabled = false;
-        toast(err.message);
-      }
-    }),
-  );
-}
-
-function showReviseBox(job) {
-  $("#reviseBox").innerHTML = `<div class="revise">
-    <label for="fb">ต้องการให้แก้อะไร</label>
-    <textarea id="fb" placeholder="เช่น เพิ่มรายละเอียดงบประมาณ หรือแก้ผู้รับผิดชอบข้อ 2 เป็นคุณสมชาย"></textarea>
-    <div class="row-end"><button class="btn" id="fbCancel">ยกเลิก</button><button class="btn primary" id="fbSend">ส่งให้ Claude แก้</button></div></div>`;
-  $("#fb").focus();
-  $("#fbCancel").onclick = () => ($("#reviseBox").innerHTML = "");
-  $("#fbSend").onclick = async () => {
-    const feedback = $("#fb").value.trim();
-    if (!feedback) return toast("กรุณาระบุสิ่งที่ต้องการให้แก้");
+  async function onAction(e) {
+    const btn = e.currentTarget;
+    const act = btn.dataset.act;
+    const base = `/api/jobs/${encodeURIComponent(job.id)}`;
+    if (act === "ask-cancel") {
+      btn.closest(".actions").innerHTML = `<span class="confirm-text">หยุด Claude ตอนนี้? ไฟล์ที่เขียนไปแล้วยังอยู่</span>
+        <button type="button" class="btn danger" data-act="cancel">${icon("x")}ยืนยันยกเลิกงาน</button>
+        <button type="button" class="btn quiet" data-act="keep">ทำต่อ</button>`;
+      $$("#jobHead [data-act]").forEach((b) => b.addEventListener("click", onAction));
+      $("#jobHead [data-act=keep]").focus();
+      return;
+    }
+    if (act === "keep") return renderJobHead(job);
+    btn.disabled = true;
     try {
-      await postJSON(`/api/jobs/${encodeURIComponent(job.id)}/revise`, { feedback });
-      toast("ส่งข้อแก้ไขแล้ว");
+      if (act === "approve") {
+        await postJSON(`${base}/approve`, { note: "" });
+        toast(job.type === "meeting-summary" ? "อนุมัติแล้ว เพิ่ม action item เข้ารายการติดตามงาน" : "อนุมัติแล้ว เก็บผลงานไว้ใน library");
+      } else if (act === "cancel") {
+        await postJSON(`${base}/cancel`);
+        toast("กำลังยกเลิก…");
+      } else if (act === "retry") {
+        await postJSON(`${base}/retry`);
+        toast("ใส่กลับเข้าคิวแล้ว");
+      }
       route();
     } catch (err) {
-      toast(err.message);
+      btn.disabled = false;
+      toast(err.message, "bad");
     }
-  };
+  }
+  $$("#jobHead [data-act]").forEach((btn) => btn.addEventListener("click", onAction));
 }
 
 function actionItemsTable(items) {
   if (!Array.isArray(items)) return null;
   if (!items.length) return `<p class="muted">ไม่มี action item</p>`;
-  return `<div class="table-wrap"><table><thead><tr><th>งาน</th><th>ผู้รับผิดชอบ</th><th>กำหนดเสร็จ</th><th>ความสำคัญ</th><th>หมายเหตุ</th></tr></thead><tbody>${items
-    .map((i) => `<tr><td>${esc(i.task)}</td><td>${esc(i.owner || "—")}</td><td>${esc(i.due ? fmtDate(i.due) : "—")}</td>
-      <td>${esc(PRIORITY[i.priority] || i.priority || "")}</td><td>${esc(i.notes || "")}</td></tr>`)
+  return `<div class="table-wrap"><table><thead><tr><th>งาน</th><th>ผู้รับผิดชอบ</th><th>กำหนดเสร็จ</th><th>ความสำคัญ</th></tr></thead><tbody>${items
+    .map((i) => `<tr><td>${esc(i.task)}${i.notes ? `<div class="muted small">${esc(i.notes)}</div>` : ""}</td><td>${esc(i.owner || "ยังไม่ระบุ")}</td>
+      <td class="num">${esc(i.due ? fmtDate(i.due) : "ยังไม่กำหนด")}</td><td>${esc(PRIORITY[i.priority] || i.priority || "")}</td></tr>`)
     .join("")}</tbody></table></div>`;
 }
 
-async function loadOutput(jobId, path) {
+async function loadOutput(jobId, file, job) {
   const view = $("#outView");
   if (!view) return;
+  const path = file.path;
   try {
     const f = await api(fileUrl(jobId, "output", path));
-    const link = `<p class="small muted"><a href="${fileUrl(jobId, "output", path, true)}" target="_blank" rel="noopener">เปิด/ดาวน์โหลด</a> · บน NAS: <code>jobs/${esc(jobId)}/output/${esc(path)}</code></p>`;
+    // the title block: what an engineer reads first on any drawing sheet
+    const block = `<dl class="title-block">
+        <div><dt>ไฟล์</dt><dd>${esc(path)}</dd></div>
+        <div><dt>งาน</dt><dd>${esc(job ? job.title : "")}</dd></div>
+        <div class="rev"><dt>Rev.</dt><dd>${esc(job && job.runs ? job.runs.length : 1)}</dd></div>
+        <div><dt>แก้ไขล่าสุด</dt><dd class="num">${esc(fmtTime(file.modified))}</dd></div>
+        <div class="path"><code>jobs/${esc(jobId)}/output/${esc(path)}</code>
+          <a href="${fileUrl(jobId, "output", path, true)}" target="_blank" rel="noopener">${icon("download")}เปิดไฟล์</a></div>
+      </dl>`;
     if (f.binary) {
-      view.innerHTML = `<p>ไฟล์นี้แสดงในหน้าเว็บไม่ได้</p>${link}`;
+      view.innerHTML = `<div class="doc"><p>ไฟล์ชนิดนี้แสดงในหน้าเว็บไม่ได้ กดเปิดไฟล์ด้านล่างเพื่อดาวน์โหลด</p></div>${block}`;
       return;
     }
     const ext = path.split(".").pop().toLowerCase();
@@ -474,90 +757,36 @@ async function loadOutput(jobId, path) {
       html = (path.endsWith("action_items.json") && actionItemsTable(parsed))
         || `<pre>${esc(parsed !== null ? JSON.stringify(parsed, null, 2) : f.text)}</pre>`;
     } else html = `<pre>${esc(f.text)}</pre>`;
-    view.innerHTML = html + link;
+    view.innerHTML = `<article class="doc">${html}</article>${block}`;
   } catch (err) {
-    view.innerHTML = `<p class="muted">${esc(err.message)}</p>`;
+    view.innerHTML = `<div class="doc"><p class="muted">เปิดไฟล์ไม่ได้: ${esc(err.message)}</p></div>`;
   }
 }
 
-function renderInputs(jobId, files) {
-  const list = (area, label) =>
-    files[area].length
-      ? `<p class="small muted">${label}</p><ul class="files">${files[area]
-          .map((f) => `<li>📄 <a href="${fileUrl(jobId, area, f.path, true)}" target="_blank" rel="noopener">${esc(f.path)}</a>
-            <span class="muted small">${(f.size / 1024).toFixed(1)} KB</span></li>`)
-          .join("")}</ul>`
-      : "";
-  $("#inFiles").innerHTML = list("input", "input/") + list("context", "context/ (ระบบเตรียมให้)") || `<p class="muted">ไม่มีไฟล์</p>`;
+function renderFiles(jobId, files) {
+  const list = (area, label) => (files[area].length ? `<h3>${label}</h3><ul>${files[area]
+    .map((f) => `<li><a href="${fileUrl(jobId, area, f.path, true)}" target="_blank" rel="noopener">${icon("file")}${esc(f.path)}</a>
+      <span class="size">${(f.size / 1024).toFixed(1)} KB</span></li>`).join("")}</ul>` : "");
+  $("#inFiles").innerHTML = list("input", "ไฟล์ที่ส่งให้ Claude") + list("context", "ข้อมูลที่ระบบเตรียมให้");
 }
 
-// ---------- new job ----------
-async function showNew() {
-  $("#view").innerHTML = `<p class="muted">กำลังโหลด…</p>`;
-  const types = await api("/api/job-types");
-  $("#view").innerHTML = `
-    <div class="panel"><h2>เลือกชนิดงาน</h2>
-      <div class="types">${types.map((t) => `<button class="type-card" data-type="${esc(t.id)}"><span class="icon">${t.icon}</span>
-        <b>${esc(t.label)}</b><span>${esc(t.description)}</span></button>`).join("")}</div></div>
-    <div id="jobForm"></div>
-    <div class="panel small muted">💡 สรุปประชุมแบบไม่ต้องเปิดหน้านี้: วางไฟล์ transcript ลงโฟลเดอร์ <code>inbox/meeting</code> บน NAS
-      · เอกสารอ้างอิง (ลูกค้า ราคา มาตรฐาน template) วางไว้ในโฟลเดอร์ <code>knowledge/</code></div>`;
-  $("#view .types").addEventListener("click", (e) => {
-    const card = e.target.closest(".type-card");
-    if (!card) return;
-    document.querySelectorAll(".type-card").forEach((c) => c.classList.toggle("active", c === card));
-    renderForm(types.find((t) => t.id === card.dataset.type));
-  });
-}
-
-function renderForm(t) {
-  const fields = t.fields
-    .map((f) => {
-      const req = f.required ? ` <span class="req">*</span>` : "";
-      const label = `<label for="f_${f.name}">${esc(f.label)}${req}</label>`;
-      if (f.kind === "textarea") return `${label}<textarea id="f_${f.name}" name="${f.name}" placeholder="${esc(f.placeholder)}"></textarea>`;
-      if (f.kind === "files") return `${label}<input type="file" id="f_${f.name}" name="files" multiple>`;
-      return `${label}<input type="text" id="f_${f.name}" name="${f.name}" placeholder="${esc(f.placeholder)}">`;
-    })
-    .join("");
-  $("#jobForm").innerHTML = `<form class="panel" id="newJob">
-    <h2>${t.icon} ${esc(t.label)}</h2><p class="muted small">${esc(t.description)}</p>${fields}
-    <p class="muted small">ผลลัพธ์: ${t.outputs.map((o) => `<code>${esc(o)}</code>`).join(" ")}</p>
-    <div class="row-end"><button type="submit" class="btn primary" id="submitJob">ส่งงานให้ Claude</button></div></form>`;
-  $("#newJob").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    fd.append("type", t.id);
-    for (const f of t.fields) {
-      const missing = f.kind === "files" ? !$("#f_files").files.length : !String(fd.get(f.name) || "").trim();
-      if (f.required && missing) return toast(`กรุณากรอก: ${f.label}`);
-    }
-    const btn = $("#submitJob");
-    btn.disabled = true;
-    btn.textContent = "กำลังส่ง…";
-    try {
-      const job = await api("/api/jobs", { method: "POST", body: fd });
-      location.hash = `#/job/${encodeURIComponent(job.id)}`;
-    } catch (err) {
-      toast(err.message);
-      btn.disabled = false;
-      btn.textContent = "ส่งงานให้ Claude";
-    }
-  });
-  $("#jobForm").scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-// ---------- follow-up list ----------
+/* ---------------------------------------------------------------- follow-up list */
 let showDone = false;
 
 function showTasks() {
   const f = lastStatus && lastStatus.followup;
-  const schedule = f && f.time ? `ทุก ${f.days.map((d) => DAYS[d] || d).join(" ")} เวลา ${f.time}` : "เมื่อเปิดใช้ FOLLOWUP_TIME";
-  $("#view").innerHTML = `<div class="panel tasks">
-    <div class="head"><h2>ติดตามงาน · action item จากประชุมที่อนุมัติแล้ว</h2>
-      <label class="small" style="font-weight:normal;margin:0"><input type="checkbox" id="showDone" ${showDone ? "checked" : ""}> แสดงรายการที่เสร็จแล้ว</label></div>
-    <div id="taskTable"><p class="muted">กำลังโหลด…</p></div>
-    <p class="muted small">ระบบสร้างงาน "ติดตามงาน" ให้อัตโนมัติ ${esc(schedule)} เพื่อร่างข้อความทวงงานที่ใกล้หรือเลยกำหนด</p></div>`;
+  const days = f ? f.days.join(",") : "";
+  const dayText = days === "mon,tue,wed,thu,fri" ? "วันจันทร์ถึงศุกร์" : days === "mon,tue,wed,thu,fri,sat,sun" ? "วัน" : f ? f.days.map((d) => DAYS[d] || d).join(" ") : "";
+  const schedule = f && f.time ? ` ทุก${dayText} เวลา ${f.time}` : " เมื่อตั้งค่า FOLLOWUP_TIME";
+  $("#view").innerHTML = `
+    <section class="tasks" aria-labelledby="tasksTitle">
+      <div class="page-head">
+        <div><h1 id="tasksTitle">ติดตามงาน</h1>
+        <p class="lede">action item จากประชุมที่อนุมัติแล้ว ระบบให้ Claude ไล่ดูและร่างข้อความทวงงาน${esc(schedule)}</p></div>
+        <label class="switch"><input type="checkbox" id="showDone" ${showDone ? "checked" : ""}> แสดงรายการที่เสร็จแล้ว</label>
+      </div>
+      <div id="taskTable" aria-busy="true">${skeletonRows(3)}</div>
+    </section>`;
   $("#showDone").onchange = (e) => {
     showDone = e.target.checked;
     route();
@@ -572,49 +801,66 @@ function renderTasks(items) {
   const el = $("#taskTable");
   if (!el) return;
   if (!items.length) {
-    el.innerHTML = `<div class="empty">ยังไม่มีรายการ · อนุมัติงาน "สรุปประชุม" แล้ว action item จะมาอยู่ที่นี่</div>`;
+    el.innerHTML = `<div class="empty"><h2>ยังไม่มีรายการ</h2><p>อนุมัติงานสรุปประชุมแล้ว action item จะมาอยู่ที่นี่ พร้อมกำหนดส่งและผู้รับผิดชอบ</p></div>`;
     return;
   }
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  el.innerHTML = `<div class="table-wrap"><table><thead><tr><th></th><th>งาน</th><th>ผู้รับผิดชอบ</th><th>กำหนดเสร็จ</th><th>ความสำคัญ</th><th>ที่มา</th></tr></thead><tbody>${items
-    .map((i) => {
-      const done = i.status === "done";
-      const days = i.due ? Math.round((new Date(`${i.due}T00:00:00`) - today) / 86400000) : null;
-      const cls = done || days === null ? "" : days < 0 ? "overdue" : days <= 3 ? "soon" : "";
-      const hint = done || days === null ? "" : days < 0 ? ` (เลยมา ${-days} วัน)` : days === 0 ? " (วันนี้)" : "";
-      return `<tr class="${done ? "done" : ""}">
-        <td><input type="checkbox" data-id="${esc(i.id)}" ${done ? "checked" : ""} title="ทำเครื่องหมายว่าเสร็จ"></td>
-        <td><b>${esc(i.id)}</b> ${esc(i.task)}${i.notes ? `<div class="muted small">${esc(i.notes)}</div>` : ""}</td>
-        <td>${esc(i.owner || "—")}</td>
-        <td class="due ${cls}">${esc(i.due ? fmtDate(i.due) + hint : "—")}</td>
-        <td><span class="prio ${esc(i.priority)}">${esc(PRIORITY[i.priority] || i.priority)}</span></td>
-        <td class="small"><a href="#/job/${encodeURIComponent(i.source_job)}">${esc(i.source_title || i.source_job)}</a></td></tr>`;
-    })
-    .join("")}</tbody></table></div>`;
-  el.querySelectorAll("input[data-id]").forEach((cb) =>
-    cb.addEventListener("change", async () => {
-      try {
-        await postJSON(`/api/tasks/${encodeURIComponent(cb.dataset.id)}`, { status: cb.checked ? "done" : "open" });
-        route();
-      } catch (err) {
-        toast(err.message);
-      }
-    }),
-  );
+  const daysLeft = (i) => (i.due ? Math.round((new Date(`${i.due}T00:00:00`) - today) / 86400000) : null);
+  const groups = [
+    ["เลยกำหนด", (i) => i.status !== "done" && daysLeft(i) !== null && daysLeft(i) < 0],
+    ["ภายใน 7 วัน", (i) => i.status !== "done" && daysLeft(i) !== null && daysLeft(i) >= 0 && daysLeft(i) <= 7],
+    ["หลังจากนั้น", (i) => i.status !== "done" && daysLeft(i) !== null && daysLeft(i) > 7],
+    ["ยังไม่มีกำหนด", (i) => i.status !== "done" && daysLeft(i) === null],
+    ["เสร็จแล้ว", (i) => i.status === "done"],
+  ];
+  const row = (i) => {
+    const done = i.status === "done";
+    const d = daysLeft(i);
+    const cls = done || d === null ? "" : d < 0 ? "overdue" : d <= 3 ? "soon" : "";
+    const hint = done || d === null ? "" : d < 0 ? `เลยมา ${-d} วัน` : d === 0 ? "วันนี้" : `อีก ${d} วัน`;
+    return `<tr class="${done ? "done" : ""}">
+      <td class="check"><input type="checkbox" data-id="${esc(i.id)}" ${done ? "checked" : ""} aria-label="ทำเครื่องหมายว่า ${esc(i.task)} เสร็จแล้ว"></td>
+      <td class="task" data-label="งาน"><span class="task-id">${esc(i.id)}</span> ${esc(i.task)}${i.notes ? `<div class="muted small">${esc(i.notes)}</div>` : ""}</td>
+      <td data-label="ผู้รับผิดชอบ">${esc(i.owner || "ยังไม่ระบุ")}</td>
+      <td class="due ${cls}" data-label="กำหนดเสร็จ"><span class="num">${esc(i.due ? fmtDate(i.due) : "ยังไม่กำหนด")}</span>${hint ? ` <span class="small">(${esc(hint)})</span>` : ""}</td>
+      <td data-label="ความสำคัญ"><span class="prio p-${esc(i.priority)}">${esc(PRIORITY[i.priority] || i.priority)}</span></td>
+      <td class="small" data-label="ที่มา"><a href="#/job/${encodeURIComponent(i.source_job)}">${esc(i.source_title || i.source_job)}</a></td></tr>`;
+  };
+  el.innerHTML = groups.map(([title, test]) => {
+    const list = items.filter(test);
+    return list.length ? `<section class="group"><h2>${esc(title)} <span class="group-count">${list.length}</span></h2>
+      <div class="table-wrap"><table><thead><tr><th class="check"><span class="sr-only">เสร็จ</span></th><th>งาน</th><th>ผู้รับผิดชอบ</th><th>กำหนดเสร็จ</th><th>ความสำคัญ</th><th>ที่มา</th></tr></thead>
+      <tbody>${list.map(row).join("")}</tbody></table></div></section>` : "";
+  }).join("");
+  $$("input[data-id]", el).forEach((cb) => cb.addEventListener("change", async () => {
+    try {
+      await postJSON(`/api/tasks/${encodeURIComponent(cb.dataset.id)}`, { status: cb.checked ? "done" : "open" });
+      toast(cb.checked ? "ทำเครื่องหมายว่าเสร็จแล้ว" : "เปิดรายการนี้อีกครั้ง");
+      route();
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  }));
 }
 
-// ---------- router ----------
+/* ---------------------------------------------------------------- router */
 function route() {
   viewToken += 1;
   const hash = location.hash || "#/";
-  const tab = hash.startsWith("#/new") ? "new" : hash.startsWith("#/tasks") ? "tasks" : "jobs";
-  document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
+  const tab = hash.startsWith("#/tasks") ? "tasks" : "jobs";
+  $$(".nav a").forEach((a) => {
+    const on = a.dataset.tab === tab;
+    a.classList.toggle("active", on);
+    if (on) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
   window.scrollTo(0, 0);
+  if (lastStatus) refreshStatus(false);
+  const fail = (err) => ($("#view").innerHTML = `<p class="muted">${esc(err.message)}</p>`);
   if (hash.startsWith("#/job/")) return showJob(decodeURIComponent(hash.slice(6)));
-  if (hash.startsWith("#/new")) return showNew().catch((err) => ($("#view").innerHTML = `<p class="muted">${esc(err.message)}</p>`));
   if (hash.startsWith("#/tasks")) return showTasks();
-  return showJobs();
+  return showHome().catch(fail);
 }
 
 window.addEventListener("hashchange", route);

@@ -81,7 +81,7 @@ def summarize(event: dict, job_dir: str) -> list[dict]:
         if subtype == "api_retry":
             err = event.get("error") or event.get("error_category") or "unknown"
             delay = round((event.get("retry_delay_ms") or 0) / 1000)
-            return [{"kind": "warn", "text": f"เรียก Claude ไม่สำเร็จ ({err}) — ลองใหม่ครั้งที่ "
+            return [{"kind": "warn", "text": f"เรียก Claude ไม่สำเร็จ ({err}) จะลองใหม่ครั้งที่ "
                                              f"{event.get('attempt', '?')}/{event.get('max_retries', '?')} ในอีก {delay} วินาที"}]
         if subtype == "permission_denied":
             tool = event.get("tool_name") or event.get("tool") or "?"
@@ -123,17 +123,17 @@ def summarize(event: dict, job_dir: str) -> list[dict]:
         window = QUOTA_WINDOWS.get(info.get("rateLimitType"), "")
         name = "โควต้า subscription" + (f" {window}" if window else "")
         if status == "allowed_warning":
-            return [{"kind": "warn", "text": f"{name} ใกล้เต็ม{pct_text}" + (f" — รีเซ็ต {when}" if when else "")}]
+            return [{"kind": "warn", "text": f"{name} ใกล้เต็ม{pct_text}" + (f", รีเซ็ต {when}" if when else "")}]
         if status == "rejected":
             extra = " ต้องซื้อ usage เพิ่ม" if info.get("errorCode") == "credits_required" else ""
-            return [{"kind": "error", "text": f"{name} เต็มแล้ว" + (f" — รีเซ็ต {when}" if when else "") + extra}]
+            return [{"kind": "error", "text": f"{name} เต็มแล้ว" + (f", รีเซ็ต {when}" if when else "") + extra}]
         return []
 
     if etype == "result":
         secs = round((event.get("duration_ms") or 0) / 1000)
         turns = event.get("num_turns", "?")
         if event.get("subtype") == "success" and not event.get("is_error"):
-            return [{"kind": "done", "text": f"Claude ทำงานเสร็จ · {turns} รอบ · {secs} วินาที"}]
+            return [{"kind": "result", "text": f"Claude ทำงานเสร็จ · {turns} รอบ · {secs} วินาที"}]
         detail = "; ".join(event.get("errors") or []) or _trunc(event.get("result", ""), 300)
         return [{"kind": "error", "text": f"Claude ทำงานไม่สำเร็จ ({event.get('subtype', 'error')})" + (f": {detail}" if detail else "")}]
 

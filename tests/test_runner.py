@@ -39,20 +39,56 @@ def test_meeting_job_runs_and_approval_feeds_followup(parts, settings):
     assert list((settings.library_dir / "meeting-summary").glob("*.md"))
 
 
-def test_revision_resumes_the_same_session(parts):
+def test_follow_up_message_resumes_the_same_session(parts):
     store, _tasks, _state, runner = parts
     job = make_meeting(store)
     asyncio.run(runner.run_job(job["id"]))
     session = store.get(job["id"])["session_id"]
 
-    runner.revise(job["id"], "เพิ่มประเด็นงบประมาณ")
+    runner.send_message(job["id"], "เพิ่มประเด็นงบประมาณ")
     cmd = runner.build_command(JOB_TYPES["meeting-summary"], resume_session=session)
     assert cmd[cmd.index("--resume") + 1] == session
     asyncio.run(runner.run_job(job["id"]))
     job = store.get(job["id"])
     assert job["status"] == NEEDS_REVIEW
-    assert [r["kind"] for r in job["runs"]] == ["initial", "revision"]
+    assert [r["kind"] for r in job["runs"]] == ["initial", "message"]
     assert job["session_id"] == session and job["pending_feedback"] is None
+    summary = (store.job_dir(job["id"]) / "output" / "summary.md").read_text("utf-8")
+    assert "เพิ่มประเด็นงบประมาณ" in summary
+
+    steps, _ = store.read_steps(job["id"])
+    users = [s for s in steps if s["kind"] == "user"]
+    assert users[0]["text"].startswith("สรุปประชุม: ประชุมโครงการ ABC") and users[0]["files"] == ["transcript.txt"]
+    assert users[1]["text"] == "เพิ่มประเด็นงบประมาณ"
+    # live token deltas are shown while running but never written to the event log
+    events = (store.job_dir(job["id"]) / "events.jsonl").read_text("utf-8")
+    assert '"stream_event"' not in events and job["id"] not in runner.partial
+
+
+def test_message_after_approval_reapproves_without_duplicate_tasks(parts, settings):
+    store, tasks, _state, runner = parts
+    job = make_meeting(store)
+    asyncio.run(runner.run_job(job["id"]))
+    approve(store, tasks, settings, job["id"])
+    tasks.set_status("A-0001", "done")
+
+    runner.send_message(job["id"], "ช่วยเพิ่มรายละเอียดหน่อย")
+    asyncio.run(runner.run_job(job["id"]))
+    job = approve(store, tasks, settings, job["id"])
+    items = tasks.all()
+    assert [i["status"] for i in items] == ["done", "open"]  # ticked item kept, open item replaced, no duplicates
+    assert job["review"]["tasks_added"] == 1
+
+
+def test_partial_text_tracking(parts):
+    _store, _tasks, _state, runner = parts
+    runner._track_partial("j", {"event": {"type": "message_start"}, "parent_tool_use_id": None})
+    for word in ("กำลัง", "พิมพ์"):
+        runner._track_partial("j", {"parent_tool_use_id": None, "event": {
+            "type": "content_block_delta", "delta": {"type": "text_delta", "text": word}}})
+    runner._track_partial("j", {"parent_tool_use_id": "toolu_x", "event": {
+        "type": "content_block_delta", "delta": {"type": "text_delta", "text": "subagent"}}})
+    assert runner.partial["j"] == "กำลังพิมพ์"
 
 
 def test_failure_and_retry(parts, monkeypatch):
@@ -64,6 +100,10 @@ def test_failure_and_retry(parts, monkeypatch):
     assert job["status"] == FAILED and "simulated failure" in job["error"]
 
     monkeypatch.delenv("FAKE_CLAUDE_FAIL")
+    try:
+        runner.send_message("20260101-000000-general-abcd", "x")
+    except KeyError:
+        pass
     runner.retry(job["id"])
     asyncio.run(runner.run_job(job["id"]))
     job = store.get(job["id"])
@@ -122,6 +162,7 @@ def test_command_uses_subscription_safely(parts, monkeypatch):
     cmd = runner.build_command(JOB_TYPES["meeting-summary"])
     assert "--bare" not in cmd  # bare mode ignores subscription logins
     assert cmd[cmd.index("--output-format") + 1] == "stream-json" and "--verbose" in cmd
+    assert "--include-partial-messages" in cmd
     assert cmd[cmd.index("--tools") + 1] == "Read,Write,Edit,Glob,Grep"
     eng = runner.build_command(JOB_TYPES["eng-qa"])
     assert "Bash(python3 *)" in eng[eng.index("--allowedTools") + 1]
@@ -159,7 +200,7 @@ def test_summarize_events():
     # shape observed from Claude Code 2.1.316 with a subscription login
     real = {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1793527200,
                                                             "rateLimitType": "seven_day", "utilization": 0.89}}
-    assert summarize(real, job_dir)[0]["text"].startswith("โควต้า subscription รายสัปดาห์ ใกล้เต็ม (89%) — รีเซ็ต ")
+    assert summarize(real, job_dir)[0]["text"].startswith("โควต้า subscription รายสัปดาห์ ใกล้เต็ม (89%), รีเซ็ต ")
 
 
 def test_store_cache_sees_external_edits_and_is_copy_safe(parts):

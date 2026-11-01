@@ -3,49 +3,53 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Work Assistant</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧭</text></svg>">
+  <meta name="color-scheme" content="light dark">
+  <title>ผู้ช่วยงาน · AI Work Assistant</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/static/fonts/ibm-plex-sans-thai-thai-400-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header class="top">
-    <div class="brand">
-      <span class="logo" aria-hidden="true">🧭</span>
-      <div>
-        <h1>AI Work Assistant</h1>
-        <p>ผู้ช่วยงานส่วนตัว · ประมวลผลด้วย Claude (subscription) · เก็บข้อมูลบน NAS</p>
-      </div>
-    </div>
-    <div class="chips" id="chips"></div>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="i-meeting" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+      <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3.5"/><path d="M20 20v-1.5a3.5 3.5 0 0 0-2.5-3.35M15 4.65a3.5 3.5 0 0 1 0 6.7"/></symbol>
+      <symbol id="i-briefcase" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5.5A1.5 1.5 0 0 1 9.5 4h5A1.5 1.5 0 0 1 16 5.5V7M3 12.5h18"/></symbol>
+      <symbol id="i-setsquare" viewBox="0 0 24 24"><path d="M4 20h16L4 4z"/><path d="M8 20v-2.5M12 20v-2.5M16 20v-2.5M4 16h2.5M4 12h2.5M4 8h2.5"/></symbol>
+      <symbol id="i-message" viewBox="0 0 24 24"><path d="M20 14a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/></symbol>
+      <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="M20.5 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></symbol>
+      <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+      <symbol id="i-retry" viewBox="0 0 24 24"><path d="M3 4v6h6"/><path d="M3.5 15a8.5 8.5 0 1 0 2-8.8L3 10"/></symbol>
+      <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13 3v6h6"/></symbol>
+      <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/></symbol>
+      <symbol id="i-tool" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z"/></symbol>
+    </defs>
+  </svg>
+
+  <a class="skip" href="#view">ข้ามไปที่เนื้อหา</a>
+  <header class="topbar">
+    <a class="brand" href="#/" aria-label="ผู้ช่วยงาน หน้าแรก">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M9 21.5h14M9 16h9M9 10.5h14"/></svg>
+      <span class="brand-text"><span class="brand-name">ผู้ช่วยงาน</span><span class="brand-sub">AI Work Assistant</span></span>
+    </a>
+    <nav class="nav" aria-label="เมนูหลัก">
+      <a href="#/" data-tab="jobs">งาน</a>
+      <a href="#/tasks" data-tab="tasks">ติดตามงาน<span id="taskCount" class="count"></span></a>
+    </nav>
+    <div class="status" id="status" aria-live="polite"></div>
   </header>
 
-  <nav class="tabs">
-    <a href="#/" data-tab="jobs">งานทั้งหมด</a>
-    <a href="#/new" data-tab="new">➕ สร้างงาน</a>
-    <a href="#/tasks" data-tab="tasks">✅ ติดตามงาน <span id="taskCount" class="count"></span></a>
-  </nav>
+  <main id="view" tabindex="-1"></main>
 
-  <main id="view"></main>
 
-  <dialog id="loginHelp">
-    <h2>เชื่อม Claude subscription</h2>
-    <p>ระบบนี้ใช้ Claude Code ที่ติดตั้งใน container และล็อกอินด้วยบัญชี Claude ของคุณเอง เลือกวิธีใดวิธีหนึ่ง</p>
-    <ol>
-      <li><b>ล็อกอินใน container (แนะนำ)</b><br>
-        เปิด Terminal ของ container ใน Container Manager หรือ SSH เข้า NAS แล้วรัน
-        <pre>sudo docker exec -it ai-work-assistant claude auth login</pre>
-        เปิดลิงก์ที่แสดงในเบราว์เซอร์ ล็อกอิน แล้วนำรหัสที่ได้มาวางใน terminal</li>
-      <li><b>ใช้ token อายุ 1 ปี</b><br>
-        บนเครื่องที่มี Claude Code รัน <code>claude setup-token</code> แล้วใส่ค่าที่ได้ใน
-        <code>CLAUDE_CODE_OAUTH_TOKEN</code> ของไฟล์ <code>.env</code> จากนั้นสั่ง Build/Start project ใหม่</li>
-    </ol>
-    <p class="muted">หน้าเว็บนี้ไม่ขอและไม่เก็บรหัสผ่านหรือ token ของ Claude</p>
-    <div class="row-end">
-      <button type="button" class="btn" id="recheckClaude">ตรวจสอบอีกครั้ง</button>
-      <button type="button" class="btn primary" onclick="this.closest('dialog').close()">ปิด</button>
-    </div>
-  </dialog>
-
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -20,7 +20,7 @@ from .config import Settings
 from .convert import READABLE_EXTS, prepare_inputs
 from .jobtypes import JOB_TYPES
 from .review import approve
-from .runner import Runner
+from .runner import MESSAGE_STATUSES, Runner
 from .state import RuntimeState
 from .store import AREAS, JobStore, now_iso
 from .tasks import TaskStore
@@ -39,8 +39,9 @@ class NoteIn(BaseModel):
     note: str = ""
 
 
-class FeedbackIn(BaseModel):
-    feedback: str
+class MessageIn(BaseModel):
+    message: str = ""
+    feedback: str = ""  # older name used by the first version of the dashboard
 
 
 class TaskStatusIn(BaseModel):
@@ -135,7 +136,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         }
         if full:
             view.update({k: job.get(k) for k in ("session_id", "instructions", "review")})
-            view.update(warnings=job.get("warnings") or [], runs=runs)
+            view.update(warnings=job.get("warnings") or [], runs=runs,
+                        can_message=job.get("status") in MESSAGE_STATUSES)
         return view
 
     # -- pages & status --------------------------------------------------------
@@ -209,6 +211,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             "type": job_type.to_dict() if job_type else None,
             "steps": steps,
             "next": total,
+            "partial_text": runner.partial.get(job_id),
             "files": {area: store.list_files(job_id, area) for area in AREAS},
         }
 
@@ -228,9 +231,11 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     async def approve_job(job_id: str, body: NoteIn):
         return job_view(approve(store, tasks, settings, job_id, body.note))
 
-    @app.post("/api/jobs/{job_id}/revise")
-    async def revise_job(job_id: str, body: FeedbackIn):
-        return job_view(runner.revise(job_id, body.feedback))
+    @app.post("/api/jobs/{job_id}/messages")
+    async def message_job(job_id: str, body: MessageIn):
+        return job_view(runner.send_message(job_id, body.message or body.feedback))
+
+    app.add_api_route("/api/jobs/{job_id}/revise", message_job, methods=["POST"])
 
     @app.post("/api/jobs/{job_id}/retry")
     async def retry_job(job_id: str):

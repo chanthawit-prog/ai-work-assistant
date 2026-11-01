@@ -26,6 +26,16 @@ def emit(event: dict) -> None:
     sys.stdout.flush()
 
 
+def stream_text(text: str, base: dict, delay: float) -> None:
+    """Mimic --include-partial-messages: token deltas, then the complete assistant message."""
+    emit({"type": "stream_event", "parent_tool_use_id": None, "event": {"type": "message_start"}, **base})
+    for word in re.findall(r"\S+\s*", text):
+        emit({"type": "stream_event", "parent_tool_use_id": None,
+              "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": word}}, **base})
+        time.sleep(delay / 6)
+    emit({"type": "assistant", "parent_tool_use_id": None, "message": {"content": [{"type": "text", "text": text}]}, **base})
+
+
 def arg_value(argv: list, name: str):
     return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else None
 
@@ -69,6 +79,7 @@ def main(argv: list) -> int:
     outputs = re.findall(r"^- (output/\S+)$", prompt, re.M)
     cwd = Path.cwd()
     base = {"session_id": session}
+    follow_up = re.search(r"^ข้อความใหม่จากผู้ใช้:\n(.+?)(?:\n\n|$)", prompt, re.M | re.S)
 
     def pause() -> None:
         time.sleep(delay)
@@ -76,9 +87,8 @@ def main(argv: list) -> int:
     emit({"type": "system", "subtype": "init", "model": "fake-model", "cwd": str(cwd), "tools": [],
           "permissionMode": arg_value(argv, "--permission-mode"), **base})
     pause()
-    emit({"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
-        {"type": "text", "text": "รับงานแล้ว กำลังอ่านไฟล์ที่ได้รับ" if "--resume" not in argv
-         else "รับข้อแก้ไขแล้ว กำลังปรับไฟล์ผลลัพธ์"}]}, **base})
+    stream_text("รับงานแล้ว กำลังอ่านไฟล์ที่ได้รับ" if not follow_up
+                else f"ได้รับข้อความแล้ว: “{follow_up.group(1).strip()[:80]}” กำลังปรับผลลัพธ์", base, delay)
     for i, rel in enumerate(inputs):
         pause()
         tool_id = f"toolu_read_{i}"
@@ -103,12 +113,14 @@ def main(argv: list) -> int:
             pause()
             path = cwd / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(sample_content(rel, title), encoding="utf-8")
+            content = sample_content(rel, title)
+            if follow_up and rel.endswith(".md"):
+                content += f"\n## ปรับตามข้อความล่าสุด\n- {follow_up.group(1).strip()}\n"
+            path.write_text(content, encoding="utf-8")
             emit({"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
                 {"type": "tool_use", "id": f"toolu_write_{i}", "name": "Write", "input": {"file_path": str(path)}}]}, **base})
     pause()
-    emit({"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
-        {"type": "text", "text": "เขียนไฟล์ผลลัพธ์ครบแล้ว (โหมดสาธิต)"}]}, **base})
+    stream_text("เขียนไฟล์ผลลัพธ์ครบแล้ว ลองเปิดดูทางขวา แล้วพิมพ์บอกได้ถ้าอยากให้ปรับตรงไหน (โหมดสาธิต)", base, delay)
     emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3 + len(inputs),
           "duration_ms": int(delay * 1000 * (4 + len(inputs) + len(outputs))),
           "result": "สร้างไฟล์ตัวอย่างเรียบร้อย (fake-claude ไม่ได้ใช้ Claude จริง)",
