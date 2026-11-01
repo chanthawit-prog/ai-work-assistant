@@ -81,20 +81,47 @@ function badge(status) {
 const fileUrl = (jobId, area, path, raw = false) =>
   `/api/jobs/${encodeURIComponent(jobId)}/files/${area}/${path.split("/").map(encodeURIComponent).join("/")}${raw ? "?raw=1" : ""}`;
 
+/* runs fn now, then again after the delay it returns; call the returned function to run it again right away */
 function poll(fn) {
   const token = viewToken;
+  let timer = null;
+  let busy = false;
+  let again = false;
   const tick = async () => {
     if (token !== viewToken) return;
+    if (busy) {
+      again = true;
+      return;
+    }
+    busy = true;
+    clearTimeout(timer);
     let delay = 4000;
     try {
       delay = (await fn()) ?? delay;
     } catch (err) {
       console.error(err);
     }
-    if (token === viewToken) setTimeout(tick, delay);
+    busy = false;
+    if (token !== viewToken) return;
+    if (again) {
+      again = false;
+      delay = 0;
+    }
+    timer = setTimeout(tick, delay);
   };
   tick();
+  return tick;
 }
+
+/* the output editor while it is open: leaving the page asks first when there are unsaved changes */
+let editing = null;
+const unsaved = () => Boolean(editing && editing.dirty());
+window.addEventListener("beforeunload", (e) => {
+  if (unsaved()) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
 
 function autoGrow(textarea) {
   const fit = () => {
@@ -237,6 +264,7 @@ function renderStatus(s) {
 }
 
 const SEND_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ + Enter" : "Ctrl + Enter";
+const SAVE_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ + S" : "Ctrl + S";
 
 async function refreshStatus(reschedule = true) {
   try {
@@ -514,7 +542,8 @@ function showJob(id) {
         <p class="reply-hint" id="replyHint"></p>
       </section>
       <section class="output" aria-labelledby="outTitle">
-        <div class="output-head"><h2 id="outTitle">ผลลัพธ์</h2><div class="tabs" id="outTabs" role="tablist"></div></div>
+        <div class="output-head"><h2 id="outTitle">ผลลัพธ์</h2><div class="tabs" id="outTabs" role="tablist"></div>
+          <div class="out-tools" id="outTools"></div></div>
         <div class="sheet" id="outView"><div class="doc"><p class="muted">ไฟล์ผลลัพธ์จะแสดงที่นี่เมื่อ Claude เขียนเสร็จ</p></div></div>
         <div class="files" id="inFiles"></div>
       </section>
@@ -527,6 +556,7 @@ function showJob(id) {
   let filesSig = "";
   let selected = null;
   let selectedSig = "";
+  let outputs = [];
   let job = null;
   let rendered = false;
 
@@ -558,6 +588,7 @@ function showJob(id) {
     e.preventDefault();
     const text = replyText.value.trim();
     if (!text && !replyFiles.length) return replyText.focus();
+    if (unsaved()) return toast("บันทึกหรือยกเลิกที่แก้ไว้ในผลลัพธ์ก่อน แล้วค่อยส่งข้อความถึง Claude", "bad");
     if (tooBig(replyFiles)) return;
     const fd = new FormData();
     fd.append("message", text);
@@ -572,6 +603,7 @@ function showJob(id) {
       replyFiles.length = 0;
       renderReplyFiles();
       headSig = "";
+      if (editing) closeEditor(false);
     } catch (err) {
       toast(err.message, "bad");
     }
@@ -583,25 +615,47 @@ function showJob(id) {
     if (key) e.target.open ? openGroups.add(key) : openGroups.delete(key);
   }, true);
 
-  const selectOutput = (outputs, path) => {
+  const selectOutput = (path) => {
     selected = path;
     $("#outTabs").innerHTML = outputs.map((f) => `<button type="button" role="tab" aria-selected="${f.path === selected}"
       data-path="${esc(f.path)}">${esc(f.path)}</button>`).join("");
+    if (editing) return; // the editor stays until you save or cancel
     const cur = outputs.find((f) => f.path === selected);
-    const sig = cur ? `${cur.modified}|${cur.size}` : "";
+    const sig = cur ? `${cur.modified}|${cur.size}|${job.status}|${job.rev}` : "";
     if (cur && sig !== selectedSig) {
       selectedSig = sig;
-      loadOutput(id, cur, job);
+      loadOutput(id, cur, job, startEdit);
     }
   };
+  /* your own edit of a result that waits for review: saved straight to the file, no Claude run */
+  const startEdit = (file, f) => openEditor(id, file, job, f, (saved, newJob) => closeEditor(saved, newJob));
+  const closeEditor = (saved, newJob) => {
+    editing = null;
+    if (newJob) job = newJob;
+    selectedSig = "";
+    selectOutput(selected);
+    if (saved) {
+      headSig = "";
+      refresh();
+    }
+  };
+  $("#outTabs").onclick = (e) => {
+    const b = e.target.closest("button[data-path]");
+    if (!b || (editing && b.dataset.path === selected)) return;
+    if (unsaved() && !confirm("ยังไม่ได้บันทึกที่แก้ไว้ ทิ้งที่แก้แล้วเปิดไฟล์อื่นหรือไม่?")) return;
+    editing = null;
+    selectedSig = "";
+    selectOutput(b.dataset.path);
+  };
 
-  poll(async () => {
+  const refresh = poll(async () => {
     const data = await api(`/api/jobs/${encodeURIComponent(id)}?after=${after}`);
     job = data.job;
     const running = job.status === "running" || job.status === "queued";
 
     const sig = `${job.status}|${job.updated_at}`;
-    if (sig !== headSig) {
+    const changed = sig !== headSig;
+    if (changed) {
       headSig = sig;
       $("#jobHead").removeAttribute("aria-busy");
       renderJobHead(job);
@@ -618,18 +672,12 @@ function showJob(id) {
 
     const order = ((data.type && data.type.outputs) || []).map((o) => o.replace(/^output\//, ""));
     const rank = (p) => (order.includes(p) ? order.indexOf(p) : 99);
-    const outputs = data.files.output.slice().sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
+    outputs = data.files.output.slice().sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
     const fsig = JSON.stringify(data.files);
-    if (fsig !== filesSig) {
+    if (fsig !== filesSig || changed) {
+      if (outputs.length) selectOutput(outputs.some((f) => f.path === selected) ? selected : outputs[0].path);
+      if (fsig !== filesSig) renderFiles(id, data.files);
       filesSig = fsig;
-      if (outputs.length) {
-        $("#outTabs").onclick = (e) => {
-          const b = e.target.closest("button[data-path]");
-          if (b) { selectedSig = ""; selectOutput(outputs, b.dataset.path); }
-        };
-        selectOutput(outputs, outputs.some((f) => f.path === selected) ? selected : outputs[0].path);
-      }
-      renderFiles(id, data.files);
     }
     return running ? 1200 : 8000;
   });
@@ -655,6 +703,9 @@ function renderThread(steps, job, openGroups, autoscroll = false) {
       const ic = st.level === "ok" ? "check" : st.level === "error" ? "x" : "alert";
       items.push(`<li class="status-line ${esc(st.level)}">${icon(ic)}${esc(st.text)}${
         st.detail ? `<span class="status-detail">· ${esc(st.detail)}</span>` : ""}</li>`);
+    } else if (st.kind === "edit") {
+      group = null;
+      items.push(`<li class="status-line edit">${icon("pencil")}${esc(st.text)}<span class="status-detail">· ${esc(fmtClock(st.t))}</span></li>`);
     } else if (st.kind === "start" || st.kind === "result") {
       // model shows in the header, timing on the status line
     } else {
@@ -773,6 +824,7 @@ function renderJobHead(job) {
       return;
     }
     if (act === "keep") return renderJobHead(job);
+    if (act === "approve" && unsaved()) return toast("บันทึกหรือยกเลิกที่แก้ไว้ก่อน แล้วค่อยอนุมัติ", "bad");
     btn.disabled = true;
     try {
       if (act === "approve") {
@@ -803,17 +855,24 @@ function actionItemsTable(items) {
     .join("")}</tbody></table></div>`;
 }
 
-async function loadOutput(jobId, file, job) {
+async function loadOutput(jobId, file, job, onEdit) {
   const view = $("#outView");
   if (!view) return;
   const path = file.path;
+  const tools = $("#outTools");
   try {
     const f = await api(fileUrl(jobId, "output", path));
+    if (editing) return; // opened while this file was loading
+    const canEdit = Boolean(f.editable && onEdit && job && job.status === "needs_review");
+    if (tools) {
+      tools.innerHTML = canEdit ? `<button type="button" class="btn" id="editOut">${icon("pencil")}แก้ไขเอง</button>` : "";
+      if (canEdit) $("#editOut").onclick = () => onEdit(file, f);
+    }
     // the title block: what an engineer reads first on any drawing sheet
     const block = `<dl class="title-block">
         <div><dt>ไฟล์</dt><dd>${esc(path)}</dd></div>
         <div><dt>งาน</dt><dd>${esc(job ? job.title : "")}</dd></div>
-        <div class="rev"><dt>Rev.</dt><dd>${esc(job && job.runs ? job.runs.length : 1)}</dd></div>
+        <div class="rev"><dt>Rev.</dt><dd>${esc(job ? job.rev || 1 : 1)}</dd></div>
         <div><dt>แก้ไขล่าสุด</dt><dd class="num">${esc(fmtTime(file.modified))}</dd></div>
         <div class="path"><code>jobs/${esc(jobId)}/output/${esc(path)}</code>
           <span class="doc-links">${/\.(md|txt)$/i.test(path) || path.endsWith("action_items.json")
@@ -835,8 +894,81 @@ async function loadOutput(jobId, file, job) {
     } else html = `<pre>${esc(f.text)}</pre>`;
     view.innerHTML = `<article class="doc">${html}</article>${block}`;
   } catch (err) {
+    if (tools) tools.innerHTML = "";
     view.innerHTML = `<div class="doc"><p class="muted">เปิดไฟล์ไม่ได้: ${esc(err.message)}</p></div>`;
   }
+}
+
+function openEditor(jobId, file, job, f, close) {
+  const view = $("#outView");
+  const md = /\.md$/i.test(file.path);
+  $("#outTools").innerHTML = "";
+  view.innerHTML = `
+    <form class="editor" id="editor" novalidate>
+      <div class="editor-bar">
+        <p class="editor-note">${icon("pencil")}<span>แก้ <b>${esc(file.path)}</b> เอง ไม่ใช้โควต้า Claude · บันทึกแล้วเป็น Rev. ${esc((job.rev || 1) + 1)}</span></p>
+        <div class="editor-actions">
+          ${md ? `<button type="button" class="btn quiet" id="edPreview" aria-pressed="false">${icon("eye")}ดูตัวอย่าง</button>` : ""}
+          <button type="button" class="btn quiet" id="edCancel">ยกเลิก</button>
+          <button type="submit" class="btn primary" id="edSave">${icon("check")}บันทึก</button>
+        </div>
+      </div>
+      <p class="notice error" id="edError" role="alert" hidden></p>
+      <label class="sr-only" for="edText">เนื้อหาไฟล์ ${esc(file.path)}</label>
+      <textarea id="edText" class="editor-text" spellcheck="false"></textarea>
+      <article class="doc editor-preview" id="edPrev" hidden></article>
+      <p class="editor-hint"><span class="kbd-hint">${esc(SAVE_KEY)} เพื่อบันทึก · </span>Claude จะรู้ว่าคุณแก้ไฟล์นี้เมื่อคุณส่งข้อความถึง Claude ครั้งถัดไป</p>
+    </form>`;
+  const form = $("#editor");
+  const text = $("#edText");
+  text.value = f.text;
+  const original = text.value; // as the browser holds it (line breaks normalised)
+  editing = { hash: location.hash, path: file.path, dirty: () => text.value !== original };
+
+  const preview = $("#edPreview");
+  if (preview) preview.onclick = () => {
+    const on = preview.getAttribute("aria-pressed") !== "true";
+    preview.setAttribute("aria-pressed", String(on));
+    preview.innerHTML = on ? `${icon("pencil")}กลับไปแก้` : `${icon("eye")}ดูตัวอย่าง`;
+    if (on) $("#edPrev").innerHTML = renderMarkdown(text.value);
+    $("#edPrev").hidden = !on;
+    text.hidden = on;
+    if (!on) text.focus();
+  };
+  $("#edCancel").onclick = () => {
+    if (editing && editing.dirty() && !confirm("ทิ้งที่แก้ไว้หรือไม่?")) return;
+    close(false);
+  };
+  text.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const save = $("#edSave");
+    const error = $("#edError");
+    save.disabled = true;
+    save.classList.add("busy");
+    try {
+      const res = await api(fileUrl(jobId, "output", file.path), {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text.value, base_sha: f.sha }) });
+      toast(res.changed ? `บันทึกแล้ว เป็น Rev. ${res.job.rev}` : "ไม่มีอะไรเปลี่ยน ไม่ได้บันทึก");
+      close(res.changed, res.job);
+    } catch (err) {
+      error.innerHTML = `${icon("alert")}<span>${esc(err.message)}</span>`;
+      error.hidden = false;
+      save.disabled = false;
+      save.classList.remove("busy");
+    }
+  });
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  form.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+  text.focus({ preventScroll: true });
+  text.setSelectionRange(0, 0);
+  text.scrollTop = 0;
 }
 
 function renderFiles(jobId, files) {
@@ -848,6 +980,7 @@ function renderFiles(jobId, files) {
 
 /* ---------------------------------------------------------------- follow-up list */
 let showDone = false;
+let taskItems = [];
 
 function showTasks() {
   const f = lastStatus && lastStatus.followup;
@@ -858,17 +991,26 @@ function showTasks() {
     <section class="tasks" aria-labelledby="tasksTitle">
       <div class="page-head">
         <div><h1 id="tasksTitle">ติดตามงาน</h1>
-        <p class="lede">action item จากประชุมที่อนุมัติแล้ว ระบบให้ Claude ไล่ดูและร่างข้อความทวงงาน${esc(schedule)}</p></div>
-        <label class="switch"><input type="checkbox" id="showDone" ${showDone ? "checked" : ""}> แสดงรายการที่เสร็จแล้ว</label>
+        <p class="lede">action item จากประชุมที่อนุมัติแล้ว และรายการที่คุณเพิ่มเอง ระบบให้ Claude ไล่ดูและร่างข้อความทวงงาน${esc(schedule)}</p></div>
+        <div class="head-actions">
+          <button type="button" class="btn" id="calOpen" aria-expanded="false" aria-controls="calPanel">${icon("calendar")}ปฏิทิน</button>
+          <button type="button" class="btn primary" id="taskAdd">${icon("plus")}เพิ่มรายการ</button>
+        </div>
       </div>
+      <div id="calPanel" hidden></div>
+      <div id="taskForm"></div>
+      <label class="switch"><input type="checkbox" id="showDone" ${showDone ? "checked" : ""}> แสดงรายการที่เสร็จแล้ว</label>
       <div id="taskTable" aria-busy="true">${skeletonRows(3)}</div>
     </section>`;
   $("#showDone").onchange = (e) => {
     showDone = e.target.checked;
     route();
   };
+  $("#taskAdd").onclick = () => openTaskForm(null);
+  $("#calOpen").onclick = () => toggleCalendar();
   poll(async () => {
-    renderTasks(await api(`/api/tasks?include_done=${showDone}`));
+    taskItems = await api(`/api/tasks?include_done=${showDone}`);
+    renderTasks(taskItems);
     return 15000;
   });
 }
@@ -876,8 +1018,9 @@ function showTasks() {
 function renderTasks(items) {
   const el = $("#taskTable");
   if (!el) return;
+  el.removeAttribute("aria-busy");
   if (!items.length) {
-    el.innerHTML = `<div class="empty"><h2>ยังไม่มีรายการ</h2><p>อนุมัติงานสรุปประชุมแล้ว action item จะมาอยู่ที่นี่ พร้อมกำหนดส่งและผู้รับผิดชอบ</p></div>`;
+    el.innerHTML = `<div class="empty"><h2>ยังไม่มีรายการ</h2><p>อนุมัติงานสรุปประชุมแล้ว action item จะมาอยู่ที่นี่ พร้อมกำหนดส่งและผู้รับผิดชอบ หรือกด เพิ่มรายการ เพื่อจดงานที่ต้องตามเอง</p></div>`;
     return;
   }
   const today = new Date();
@@ -895,27 +1038,220 @@ function renderTasks(items) {
     const d = daysLeft(i);
     const cls = done || d === null ? "" : d < 0 ? "overdue" : d <= 3 ? "soon" : "";
     const hint = done || d === null ? "" : d < 0 ? `เลยมา ${-d} วัน` : d === 0 ? "วันนี้" : `อีก ${d} วัน`;
+    const source = i.source_job
+      ? `<a href="#/job/${encodeURIComponent(i.source_job)}">${esc(i.source_title || i.source_job)}</a>`
+      : `<span class="muted">เพิ่มเอง</span>`;
     return `<tr class="${done ? "done" : ""}">
       <td class="check"><input type="checkbox" data-id="${esc(i.id)}" ${done ? "checked" : ""} aria-label="ทำเครื่องหมายว่า ${esc(i.task)} เสร็จแล้ว"></td>
       <td class="task" data-label="งาน"><span class="task-id">${esc(i.id)}</span> ${esc(i.task)}${i.notes ? `<div class="muted small">${esc(i.notes)}</div>` : ""}</td>
       <td data-label="ผู้รับผิดชอบ">${esc(i.owner || "ยังไม่ระบุ")}</td>
       <td class="due ${cls}" data-label="กำหนดเสร็จ"><span class="num">${esc(i.due ? fmtDate(i.due) : "ยังไม่กำหนด")}</span>${hint ? ` <span class="small">(${esc(hint)})</span>` : ""}</td>
       <td data-label="ความสำคัญ"><span class="prio p-${esc(i.priority)}">${esc(PRIORITY[i.priority] || i.priority)}</span></td>
-      <td class="small" data-label="ที่มา"><a href="#/job/${encodeURIComponent(i.source_job)}">${esc(i.source_title || i.source_job)}</a></td></tr>`;
+      <td class="small" data-label="ที่มา">${source}</td>
+      <td class="edit"><button type="button" class="icon-btn" data-edit="${esc(i.id)}" aria-label="แก้ไข ${esc(i.id)} ${esc(i.task)}">${icon("pencil")}</button></td></tr>`;
   };
   el.innerHTML = groups.map(([title, test]) => {
     const list = items.filter(test);
     return list.length ? `<section class="group"><h2>${esc(title)} <span class="group-count">${list.length}</span></h2>
-      <div class="table-wrap"><table><thead><tr><th class="check"><span class="sr-only">เสร็จ</span></th><th>งาน</th><th>ผู้รับผิดชอบ</th><th>กำหนดเสร็จ</th><th>ความสำคัญ</th><th>ที่มา</th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th class="check"><span class="sr-only">เสร็จ</span></th><th>งาน</th><th>ผู้รับผิดชอบ</th><th>กำหนดเสร็จ</th><th>ความสำคัญ</th><th>ที่มา</th><th class="edit"><span class="sr-only">แก้ไข</span></th></tr></thead>
       <tbody>${list.map(row).join("")}</tbody></table></div></section>` : "";
   }).join("");
   $$("input[data-id]", el).forEach((cb) => cb.addEventListener("change", async () => {
     try {
       await postJSON(`/api/tasks/${encodeURIComponent(cb.dataset.id)}`, { status: cb.checked ? "done" : "open" });
       toast(cb.checked ? "ทำเครื่องหมายว่าเสร็จแล้ว" : "เปิดรายการนี้อีกครั้ง");
-      route();
+      refreshTasks();
     } catch (err) {
       toast(err.message, "bad");
+    }
+  }));
+  $$("button[data-edit]", el).forEach((b) => b.addEventListener("click", () => {
+    const item = taskItems.find((x) => x.id === b.dataset.edit);
+    if (item) openTaskForm(item);
+  }));
+}
+
+async function refreshTasks() {
+  try {
+    taskItems = await api(`/api/tasks?include_done=${showDone}`);
+    renderTasks(taskItems);
+    refreshStatus(false);
+  } catch (err) {
+    toast(err.message, "bad");
+  }
+}
+
+const isoDay = (offset) => {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+function openTaskForm(item) {
+  const holder = $("#taskForm");
+  const v = item || { task: "", owner: "", due: "", priority: "medium", notes: "" };
+  holder.innerHTML = `
+    <form class="schedule-form task-form" id="taskFormEl" novalidate>
+      <h2>${item ? `แก้ไข <span class="task-id">${esc(item.id)}</span>` : "เพิ่มรายการติดตาม"}</h2>
+      <div class="field"><label for="tTask">งานที่ต้องทำ</label>
+        <textarea id="tTask" rows="2" maxlength="500" placeholder="เช่น ส่งใบเสนอราคาตู้ MDB ฉบับแก้ไขให้ ACME"></textarea></div>
+      <div class="field-row">
+        <div class="field"><label for="tOwner">ผู้รับผิดชอบ</label>
+          <input id="tOwner" type="text" maxlength="120" autocomplete="off" placeholder="เช่น คุณสมชาย (จัดซื้อ ACME)"></div>
+        <div class="field"><label for="tDue">กำหนดเสร็จ</label>
+          <input id="tDue" type="date">
+          <div class="quick-dates" role="group" aria-label="เลือกวันเร็ว">
+            <button type="button" class="btn quiet" data-day="0">วันนี้</button>
+            <button type="button" class="btn quiet" data-day="1">พรุ่งนี้</button>
+            <button type="button" class="btn quiet" data-day="7">อีก 7 วัน</button>
+            <button type="button" class="btn quiet" data-day="">ไม่กำหนด</button>
+          </div></div>
+      </div>
+      <div class="field"><span class="label" id="tPrioLabel">ความสำคัญ</span>
+        <div class="chips" role="radiogroup" aria-labelledby="tPrioLabel">${["high", "medium", "low"].map((p) => `
+          <label class="type-option"><input type="radio" name="tPrio" value="${p}"><span>${esc(PRIORITY[p])}</span></label>`).join("")}</div></div>
+      <div class="field"><label for="tNotes">หมายเหตุ</label>
+        <textarea id="tNotes" rows="2" maxlength="1000" placeholder="ไม่บังคับ"></textarea></div>
+      ${item && item.source_job ? `<p class="small muted">ที่มา: <a href="#/job/${encodeURIComponent(item.source_job)}">${esc(item.source_title || item.source_job)}</a>
+        · ที่แก้ไว้จะไม่ถูกทับ แม้อนุมัติประชุมนี้อีกครั้ง</p>` : ""}
+      <div class="form-actions" id="tActions">
+        <button type="submit" class="btn primary" id="tSave">${icon("check")}บันทึก</button>
+        <button type="button" class="btn quiet" id="tCancel">ยกเลิก</button>
+        ${item ? `<button type="button" class="btn quiet danger-text push-end" id="tDelete">${icon("trash")}ลบรายการนี้</button>` : ""}
+      </div>
+    </form>`;
+  const form = $("#taskFormEl");
+  $("#tTask").value = v.task || "";
+  $("#tOwner").value = v.owner || "";
+  $("#tDue").value = v.due || "";
+  $("#tNotes").value = v.notes || "";
+  $$("input[name=tPrio]", form).forEach((r) => (r.checked = r.value === (v.priority || "medium")));
+  $$("[data-day]", form).forEach((b) => b.addEventListener("click", () => {
+    $("#tDue").value = b.dataset.day === "" ? "" : isoDay(Number(b.dataset.day));
+  }));
+  const close = () => (holder.innerHTML = "");
+  $("#tCancel").onclick = close;
+  const del = $("#tDelete");
+  if (del) del.onclick = () => {
+    $("#tActions").innerHTML = `<span class="confirm-text">ลบ ${esc(item.id)} ถาวร?${item.source_job ? " อนุมัติประชุมนี้อีกครั้งก็จะไม่กลับมา" : ""}</span>
+      <button type="button" class="btn danger" id="tDeleteYes">${icon("trash")}ยืนยันลบ</button>
+      <button type="button" class="btn quiet" id="tDeleteNo">ไม่ลบ</button>`;
+    $("#tDeleteNo").onclick = () => openTaskForm(item);
+    $("#tDeleteYes").onclick = async (e) => {
+      e.currentTarget.disabled = true;
+      try {
+        await api(`/api/tasks/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+        toast(`ลบ ${item.id} แล้ว`);
+        close();
+        refreshTasks();
+      } catch (err) {
+        toast(err.message, "bad");
+        e.currentTarget.disabled = false;
+      }
+    };
+    $("#tDeleteNo").focus();
+  };
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const task = $("#tTask");
+    if (!task.value.trim()) {
+      task.setAttribute("aria-invalid", "true");
+      toast("กรอกงานที่ต้องทำก่อน", "bad");
+      return task.focus();
+    }
+    task.removeAttribute("aria-invalid");
+    const body = { task: task.value.trim(), owner: $("#tOwner").value.trim() || null, due: $("#tDue").value || null,
+      priority: form.elements.tPrio.value || "medium", notes: $("#tNotes").value.trim() };
+    const save = $("#tSave");
+    save.disabled = true;
+    try {
+      const saved = await api(item ? `/api/tasks/${encodeURIComponent(item.id)}` : "/api/tasks", {
+        method: item ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast(item ? `บันทึก ${saved.id} แล้ว` : `เพิ่ม ${saved.id} แล้ว`);
+      close();
+      refreshTasks();
+    } catch (err) {
+      toast(err.message, "bad");
+      save.disabled = false;
+    }
+  });
+  $("#tTask").focus();
+  holder.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+}
+
+/* the calendar feed: a private address calendar apps can subscribe to (no dashboard password) */
+async function toggleCalendar(force) {
+  const panel = $("#calPanel");
+  const btn = $("#calOpen");
+  const open = force ?? panel.hidden;
+  panel.hidden = !open;
+  btn.setAttribute("aria-expanded", String(open));
+  if (!open) return;
+  try {
+    renderCalendar(await api("/api/calendar"));
+  } catch (err) {
+    toast(err.message, "bad");
+  }
+}
+
+function renderCalendar(cal) {
+  const panel = $("#calPanel");
+  if (!panel) return;
+  const url = cal.path ? `${location.origin}${cal.path}` : "";
+  const webcal = url.replace(/^https?:/, "webcal:");
+  panel.innerHTML = cal.enabled ? `
+    <section class="cal-panel" aria-labelledby="calTitle">
+      <h2 id="calTitle">${icon("calendar")}กำหนดส่งในปฏิทินของคุณ</h2>
+      <p class="small">รายการที่ยังไม่เสร็จและมีกำหนดเสร็จ จะขึ้นเป็นนัดทั้งวันในปฏิทิน พร้อมเตือน 9 โมงเช้าวันก่อนกำหนด
+        ติ๊กเสร็จแล้วจะหายจากปฏิทินในรอบอัปเดตถัดไป (แอปปฏิทินดึงใหม่เองทุกหนึ่งถึงหลายชั่วโมง)</p>
+      <div class="cal-link"><code id="calUrl">${esc(url)}</code>
+        <button type="button" class="btn" id="calCopy">${icon("copy")}คัดลอกลิงก์</button></div>
+      <div class="form-actions">
+        <a class="btn primary" href="${esc(webcal)}">${icon("calendar")}เปิดในแอปปฏิทิน</a>
+        <a class="btn quiet" href="${esc(url)}" download="followup.ics">${icon("download")}ดาวน์โหลด .ics</a>
+      </div>
+      <details class="kb-notes"><summary>วิธีเพิ่มในแต่ละแอป</summary><ul>
+        <li><b>iPhone / iPad / Mac</b>: กด เปิดในแอปปฏิทิน แล้วกด สมัครรับ (Subscribe)</li>
+        <li><b>Outlook บน Windows</b>: ปฏิทิน › เพิ่มปฏิทิน › จากอินเทอร์เน็ต แล้ววางลิงก์</li>
+        <li><b>Android</b>: ใช้แอป ICSx⁵ (ฟรี) วางลิงก์นี้ แล้วปฏิทินในเครื่องจะเห็นรายการ</li>
+        <li>มือถือต้องอยู่ในวง LAN ของออฟฟิศหรือต่อ VPN เดียวกับ dashboard จึงจะอัปเดตได้
+          ส่วน Google Calendar และ Outlook.com ดึงจากอินเทอร์เน็ต จึงใช้ได้เฉพาะเมื่อเปิด NAS ออกอินเทอร์เน็ต ซึ่งไม่แนะนำ</li>
+        <li>ดาวน์โหลด .ics คือนำเข้าครั้งเดียว ไม่อัปเดตตาม</li>
+      </ul></details>
+      <p class="notice warn">${icon("alert")}<span>ใครมีลิงก์นี้ดูรายการติดตามงานได้โดยไม่ต้องใส่รหัสผ่าน อย่าส่งต่อ ถ้าลิงก์หลุด กด สร้างลิงก์ใหม่ ลิงก์เดิมจะใช้ไม่ได้ทันที</span></p>
+      <div class="form-actions">
+        <button type="button" class="btn quiet" data-cal="new">${icon("retry")}สร้างลิงก์ใหม่</button>
+        <button type="button" class="btn quiet danger-text" data-cal="off">${icon("x")}ปิดลิงก์ปฏิทิน</button>
+      </div>
+    </section>` : `
+    <section class="cal-panel" aria-labelledby="calTitle">
+      <h2 id="calTitle">${icon("calendar")}ดูกำหนดส่งในปฏิทินมือถือหรือ Outlook</h2>
+      <p class="small">สร้างลิงก์ปฏิทินส่วนตัว แล้วสมัครรับในแอปปฏิทิน รายการที่มีกำหนดเสร็จจะขึ้นข้างนัดประชุมของคุณ และอัปเดตเองเมื่อรายการเปลี่ยน
+        ลิงก์นี้เปิดได้โดยไม่ต้องใส่รหัสผ่าน dashboard (แอปปฏิทินใส่รหัสผ่านไม่ได้) จึงเป็นรหัสลับยาวที่ยกเลิกได้ทุกเมื่อ</p>
+      <div class="form-actions"><button type="button" class="btn primary" data-cal="new">${icon("calendar")}สร้างลิงก์ปฏิทิน</button></div>
+    </section>`;
+  const copy = $("#calCopy");
+  if (copy) copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast("คัดลอกลิงก์แล้ว");
+    } catch (err) { /* http:// pages may not get the clipboard: select the text instead */
+      getSelection().selectAllChildren($("#calUrl"));
+      toast("เลือกลิงก์ไว้แล้ว กดคัดลอก (Ctrl + C) ได้เลย");
+    }
+  };
+  $$("[data-cal]", panel).forEach((b) => b.addEventListener("click", async () => {
+    const act = b.dataset.cal;
+    if (act === "new" && cal.enabled && !confirm("สร้างลิงก์ใหม่? ลิงก์เดิมจะใช้ไม่ได้ ต้องสมัครรับในแอปปฏิทินใหม่")) return;
+    if (act === "off" && !confirm("ปิดลิงก์ปฏิทิน? แอปปฏิทินที่สมัครรับไว้จะดึงข้อมูลไม่ได้อีก")) return;
+    b.disabled = true;
+    try {
+      const next = await api("/api/calendar", { method: act === "new" ? "POST" : "DELETE" });
+      toast(act === "off" ? "ปิดลิงก์ปฏิทินแล้ว" : cal.enabled ? "สร้างลิงก์ใหม่แล้ว ลิงก์เดิมใช้ไม่ได้แล้ว" : "สร้างลิงก์ปฏิทินแล้ว");
+      renderCalendar(next);
+    } catch (err) {
+      toast(err.message, "bad");
+      b.disabled = false;
     }
   }));
 }
@@ -1338,6 +1674,11 @@ async function showSystem() {
 
 /* ---------------------------------------------------------------- router */
 function route() {
+  if (unsaved() && !confirm("ยังไม่ได้บันทึกที่แก้ไว้ ออกจากหน้านี้และทิ้งที่แก้หรือไม่?")) {
+    if (location.hash !== editing.hash) history.replaceState(null, "", editing.hash);
+    return;
+  }
+  editing = null;
   viewToken += 1;
   const hash = location.hash || "#/";
   const tab = hash.startsWith("#/tasks") ? "tasks" : hash.startsWith("#/schedules") ? "schedules" : hash.startsWith("#/system") ? "system" : "jobs";

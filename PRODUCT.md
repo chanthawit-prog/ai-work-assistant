@@ -39,8 +39,8 @@ tokens, not inverted.
   above and below.
 - **Density:** comfortable lists with dividers, no card grid.
 - **Signature move:** every output document is shown as a **drawing sheet with a title block** (file, job, Rev.,
-  last modified, path on the NAS). Each follow-up round with Claude is a new revision, which is how engineers already
-  track documents.
+  last modified, path on the NAS). Each follow-up round with Claude, and each edit you save yourself, is a new
+  revision, which is how engineers already track documents.
 
 ## Work areas
 
@@ -48,8 +48,8 @@ tokens, not inverted.
 |---|---|
 | Header | Where am I (งาน / ติดตามงาน), is Claude connected, how much subscription quota is used, is a job running |
 | Home | One composer to send work to Claude, then jobs grouped by what needs you: รอคุณตรวจ, กำลังทำ, ล่าสุด |
-| Job | Left: the conversation (your messages, Claude's replies, collapsible activity, live typing) and the reply box. Right: the output sheet |
-| ติดตามงาน | Action items from approved meetings, grouped by due date, tick to close |
+| Job | Left: the conversation (your messages, Claude's replies, collapsible activity, live typing, your own edits) and the reply box. Right: the output sheet, which turns into a plain text editor (แก้ไขเอง) while the job waits for review |
+| ติดตามงาน | Action items from approved meetings and ones you add, grouped by due date, tick to close, edit in a form above the list; a private calendar link puts due dates in the phone's calendar |
 
 ## Constraints
 

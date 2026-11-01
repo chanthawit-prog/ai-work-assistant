@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import sysmon
+from .calendar_feed import tasks_ics
 from .claude_status import check_claude
 from .config import Settings
 from .convert import READABLE_EXTS, prepare_inputs
@@ -28,16 +29,16 @@ from .export_docx import action_items_markdown, markdown_to_docx
 from .jobtypes import JOB_TYPES
 from .knowledge import KnowledgeIndex, kb_search
 from .notify import Notifier
-from .review import approve, slugify
+from .review import EDITABLE_EXTS, approve, file_sha, save_edit, slugify
 from .runner import MESSAGE_STATUSES, Runner
 from .schedules import INCLUDES, ScheduleStore, next_run, schedulable_types
 from .schedules import create_job as create_scheduled_job
 from .state import RuntimeState
-from .store import AREAS, JOB_ID_RE, JobStore, now_iso, read_json
+from .store import AREAS, JOB_ID_RE, JobStore, now_iso, read_json, revision
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
@@ -54,6 +55,8 @@ LOGIN_RECHECK = 60
 # to add the dashboard to its home screen. None of these files holds any data.
 PUBLIC_PATHS = frozenset({"/healthz", "/static/manifest.webmanifest", "/static/favicon.svg", "/static/icon-192.png",
                           "/static/icon-512.png", "/static/icon-maskable-512.png", "/static/apple-touch-icon.png"})
+# the calendar feed: calendar apps cannot send the dashboard password, so its address holds a secret instead
+CALENDAR_PREFIX = "/calendar/"
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -71,6 +74,19 @@ class MessageIn(BaseModel):
 
 class TaskStatusIn(BaseModel):
     status: str
+
+
+class TaskIn(BaseModel):
+    task: str = ""
+    owner: str | None = None
+    due: str | None = None
+    priority: str = "medium"
+    notes: str = ""
+
+
+class EditIn(BaseModel):
+    text: str
+    base_sha: str = ""  # the file's sha256 when you opened it (from GET .../files/output/...)
 
 
 class ScheduleIn(BaseModel):
@@ -131,7 +147,7 @@ class BasicAuth(BaseHTTPMiddleware):
         self.password = password.encode()
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in PUBLIC_PATHS:
+        if request.url.path in PUBLIC_PATHS or request.url.path.startswith(CALENDAR_PREFIX):
             return await call_next(request)
         header = request.headers.get("authorization", "")
         if header.startswith("Basic "):
@@ -237,6 +253,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             "type_label": job_type.label if job_type else job["type"],
             "icon": job_type.icon if job_type else "•",
             "run_count": len(runs),
+            "rev": revision(job),
             "started_at": last.get("started_at"),
             "ended_at": last.get("ended_at"),
             "last_step": runner.last_step.get(job["id"]),
@@ -244,7 +261,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         }
         if full:
             view.update({k: job.get(k) for k in ("session_id", "instructions", "review")})
-            view.update(warnings=job.get("warnings") or [], runs=runs,
+            view.update(warnings=job.get("warnings") or [], runs=runs, edits=job.get("edits") or [],
                         can_message=job.get("status") in MESSAGE_STATUSES)
         return view
 
@@ -350,7 +367,17 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             if not raw:
                 return {"path": rel, "size": size, "binary": True}
             return FileResponse(path, filename=path.name)
-        return {"path": rel, "size": size, "text": path.read_text("utf-8", errors="replace")}
+        data = path.read_bytes()
+        return {"path": rel, "size": size, "sha": file_sha(data), "text": data.decode("utf-8", errors="replace"),
+                "editable": area == "output" and path.suffix.lower() in EDITABLE_EXTS}
+
+    @app.put("/api/jobs/{job_id}/files/output/{rel:path}")
+    async def edit_output(job_id: str, rel: str, body: EditIn):
+        """Save your own edit of a result that waits for review. No Claude run, no quota."""
+        if len(body.text.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise HTTPException(413, f"ข้อความยาวเกิน {MAX_TEXT_BYTES // MB} MB")
+        job, changed = await asyncio.to_thread(save_edit, store, job_id, rel, body.text, body.base_sha)
+        return {"job": job_view(job), "changed": changed}
 
     @app.post("/api/jobs/{job_id}/approve")
     async def approve_job(job_id: str, body: NoteIn):
@@ -397,7 +424,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             raise ValueError("ส่งออกเป็น Word ได้เฉพาะไฟล์ .md .txt และ action_items.json")
         modified = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
         data = await asyncio.to_thread(markdown_to_docx, md, title=job["title"], file_name=rel,
-                                       rev=max(1, len(job.get("runs") or [])), modified=modified,
+                                       rev=revision(job), modified=modified,
                                        template=settings.report_template, embed_fonts=settings.docx_embed_fonts)
         filename = f"{slugify(job['title'])}_{Path(rel).stem}.docx"
         return Response(data, media_type=DOCX_TYPE, headers={
@@ -539,8 +566,52 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         items = tasks.all(include_done=include_done)
         return sorted(items, key=lambda i: (i.get("status") == "done", i.get("due") or "9999-12-31", i["id"]))
 
+    @app.post("/api/tasks")
+    async def add_task(body: TaskIn):
+        return tasks.add(body.model_dump())
+
     @app.post("/api/tasks/{item_id}")
     async def set_task(item_id: str, body: TaskStatusIn):
         return tasks.set_status(item_id, body.status)
+
+    @app.put("/api/tasks/{item_id}")
+    async def edit_task(item_id: str, body: TaskIn):
+        return tasks.update(item_id, body.model_dump(exclude_unset=True))
+
+    @app.delete("/api/tasks/{item_id}")
+    async def delete_task(item_id: str):
+        tasks.delete(item_id)
+        return {"ok": True}
+
+    # -- calendar feed of due dates ---------------------------------------------
+    def calendar_info() -> dict:
+        token = state.get("calendar_token")
+        return {"enabled": bool(token), "path": f"{CALENDAR_PREFIX}{token}.ics" if token else None}
+
+    @app.get("/api/calendar")
+    async def calendar_status():
+        return calendar_info()
+
+    @app.post("/api/calendar")
+    async def calendar_new_link():
+        """Make the feed address, or replace it: the old address stops working at once."""
+        state.set("calendar_token", secrets.token_urlsafe(24))
+        return calendar_info()
+
+    @app.delete("/api/calendar")
+    async def calendar_off():
+        state.set("calendar_token", None)
+        return calendar_info()
+
+    @app.get(CALENDAR_PREFIX + "{name}", include_in_schema=False)
+    async def calendar_feed(name: str, request: Request):
+        token = state.get("calendar_token")
+        given = name[:-4] if name.endswith(".ics") else ""
+        if not token or not secrets.compare_digest(given.encode(), token.encode()):
+            raise KeyError(name)
+        base = settings.dashboard_url or str(request.base_url)
+        body = tasks_ics(tasks.open_items(), base)
+        return Response(body, media_type="text/calendar; charset=utf-8", headers={
+            "Content-Disposition": 'inline; filename="followup.ics"', "Cache-Control": "no-cache"})
 
     return app

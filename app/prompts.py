@@ -14,7 +14,7 @@ from .jobtypes import JobType
 BUNDLED_DIR = Path(__file__).parent / "prompts"
 # what the files the app puts in context/ are, so Claude does not have to guess
 CONTEXT_NOTES = {
-    "action_items.json": "รายการติดตามงาน (action item) ที่ยังเปิดอยู่ จากการประชุมที่ผู้ใช้อนุมัติแล้ว",
+    "action_items.json": "รายการติดตามงาน (action item) ที่ยังเปิดอยู่ จากการประชุมที่ผู้ใช้อนุมัติแล้ว และที่ผู้ใช้เพิ่มเอง",
     "recent/": "ผลงานที่ผู้ใช้ตรวจและอนุมัติแล้วใน 7 วันล่าสุด แยกโฟลเดอร์ตามชนิดงาน",
     "meetings/": "สรุปประชุมที่อนุมัติแล้วซึ่งกล่าวถึงลูกค้ารายนี้",
 }
@@ -42,9 +42,17 @@ def today_text(now: datetime | None = None) -> str:
     return f"{now:%Y-%m-%d} (วัน{THAI_DAYS[now.weekday()]}) เวลา {now:%H:%M}"
 
 
+def edited_note(edited: list[str] | None) -> list[str]:
+    """Outputs the user changed on the dashboard after Claude's last run."""
+    if not edited:
+        return []
+    return ["", "ผู้ใช้แก้ไฟล์ผลลัพธ์เหล่านี้ด้วยตนเองหลังรอบก่อน:", *[f"- output/{f}" for f in edited],
+            "ให้อ่านไฟล์ฉบับล่าสุดก่อนแก้ทุกครั้ง และคงส่วนที่ผู้ใช้แก้ไว้ เว้นแต่ผู้ใช้สั่งให้เปลี่ยน"]
+
+
 def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[str],
                  context: list[str], feedback: str | None = None, resumed: bool = False,
-                 new_files: list[str] | None = None) -> str:
+                 new_files: list[str] | None = None, edited: list[str] | None = None) -> str:
     outputs = [f"- {o}" for o in job_type.outputs]
     attached = ["", "ไฟล์ที่แนบมากับข้อความนี้ (อยู่ใน input/):", *[f"- input/{f}" for f in new_files]] if new_files else []
     if feedback and resumed:
@@ -52,6 +60,7 @@ def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[
             "ข้อความใหม่จากผู้ใช้:",
             feedback.strip(),
             *attached,
+            *edited_note(edited),
             "",
             "ถ้าเป็นคำถาม ให้ตอบได้เลย ถ้าเป็นคำขอให้แก้หรือทำเพิ่ม ให้ทำในโฟลเดอร์ output/",
             "โดยไฟล์ผลลัพธ์หลักต้องยังอยู่ครบ:",
@@ -84,5 +93,6 @@ def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[
         lines += ["", "คำสั่ง / คำถามจากผู้ใช้:", job["instructions"]]
     if feedback:
         lines += ["", "ข้อความเพิ่มเติมจากผู้ใช้ (หลังรอบก่อนหน้า):", feedback.strip()]
+    lines += edited_note(edited)
     lines += ["", "ไฟล์ผลลัพธ์ที่ต้องสร้าง:", *outputs]
     return "\n".join(lines)

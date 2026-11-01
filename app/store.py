@@ -62,6 +62,12 @@ def write_json(path: Path, data: Any) -> None:
         raise
 
 
+def revision(job: dict) -> int:
+    """The document revision in the title block and the Word file: one per Claude run plus one per edit
+    you saved yourself on the dashboard."""
+    return max(1, len(job.get("runs") or []) + len(job.get("edits") or []))
+
+
 def safe_filename(name: str) -> str:
     """Keep Thai and other Unicode characters; drop path parts and characters that are unsafe on SMB."""
     name = Path(name.replace("\\", "/")).name
@@ -77,6 +83,11 @@ class JobStore:
         self.settings = settings
         self._lock = threading.RLock()
         self._cache: dict[str, tuple[int, int, dict]] = {}  # path -> (mtime_ns, size, job)
+
+    @property
+    def lock(self) -> threading.RLock:
+        """Hold it to read a job, act on it and save it without another request changing it in between."""
+        return self._lock
 
     def _read_job_file(self, path: Path) -> dict | None:
         """The dashboard polls often; re-read job.json only when it changed on disk."""

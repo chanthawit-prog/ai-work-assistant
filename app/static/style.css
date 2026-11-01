@@ -125,6 +125,8 @@ h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.3; text-wrap: balance; 
 p { margin: 0; text-wrap: pretty; }
 a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 a:hover { color: var(--ink); }
+a.btn { text-decoration: none; }
+a.btn.primary:hover { color: var(--on-accent); }
 code, pre { font-family: var(--font-mono); font-size: 0.875em; }
 code { padding: 0.05em 0.35em; border-radius: 4px; background: var(--sunken); }
 pre { margin: var(--s3) 0; padding: var(--s3) var(--s4); border-radius: var(--r-sm); background: var(--sunken); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -213,12 +215,13 @@ main:focus { outline: none; }
 .btn.busy::after { content: ""; position: absolute; width: 16px; height: 16px; border: 2px solid var(--on-accent); border-right-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
 .icon-btn { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--ink-3); cursor: pointer; }
 .icon-btn:hover { background: var(--line); color: var(--ink); }
-input[type=text], textarea {
+input[type=text], input[type=date], textarea {
   width: 100%; padding: var(--s2) var(--s3);
   border: 1px solid var(--control); border-radius: var(--r-md);
   background: var(--surface); color: var(--ink); font: inherit; font-size: var(--fs-body); /* 16px avoids iOS zoom */
 }
-input[type=text]:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; border-color: var(--focus); }
+input[type=text]:focus-visible, input[type=date]:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; border-color: var(--focus); }
+input[type=date] { height: 44px; font-variant-numeric: tabular-nums; } /* the same height as the text boxes beside it */
 select {
   min-height: 40px; padding: 0 var(--s3);
   border: 1px solid var(--control); border-radius: var(--r-md);
@@ -416,6 +419,19 @@ td.num { white-space: nowrap; }
 .title-block .path { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2); border-right: 0; border-bottom: 0; }
 .title-block .path code { min-width: 0; overflow-wrap: anywhere; background: none; padding: 0; color: var(--ink-2); }
 .title-block .path a { display: inline-flex; align-items: center; gap: var(--s1); white-space: nowrap; }
+/* your own edit of a result: the sheet becomes a plain text editor, same font as the document */
+.out-tools { margin-left: auto; }
+.out-tools:empty { display: none; }
+.editor-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2) var(--s3); padding: var(--s2) var(--s3) var(--s2) var(--s4); border-bottom: 1px solid var(--line); background: var(--sunken); }
+.editor-note { display: flex; align-items: center; gap: var(--s2); min-width: 0; margin: 0; color: var(--ink-2); font-size: var(--fs-small); }
+.editor-note .icon { flex: none; }
+.editor-note b { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; }
+.editor-actions { display: flex; flex-wrap: wrap; gap: var(--s1); margin-left: auto; }
+.editor .notice { margin: var(--s3) var(--s3) 0; }
+.editor-text { display: block; height: 60vh; min-height: 280px; padding: var(--s4); border: 0; border-radius: 0; background: var(--surface); line-height: 1.75; resize: vertical; tab-size: 4; }
+.editor-text:focus-visible { box-shadow: inset 0 0 0 2px var(--focus); }
+.editor-hint { margin: 0; padding: var(--s2) var(--s4); border-top: 1px solid var(--line); color: var(--ink-3); font-size: var(--fs-meta); }
+.status-line.edit { color: var(--accent-ink); }
 .files { margin-top: var(--s4); font-size: var(--fs-small); }
 .files h3 { margin: var(--s3) 0 var(--s1); color: var(--ink-3); font-size: var(--fs-meta); font-weight: 600; }
 .files ul { margin: 0; padding: 0; list-style: none; }
@@ -469,6 +485,22 @@ td.num { white-space: nowrap; }
 .prio { padding: 1px 8px; border-radius: 999px; background: var(--sunken); color: var(--ink-2); font-size: var(--fs-meta); }
 .prio.p-high { background: var(--bad-soft); color: var(--bad); }
 .switch { display: inline-flex; align-items: center; gap: var(--s2); min-height: 40px; color: var(--ink-2); font-weight: 400; cursor: pointer; }
+.tasks > .switch { margin-bottom: var(--s3); }
+.head-actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.tasks tr { padding-right: 44px; }
+.tasks td.edit { position: absolute; top: var(--s2); right: 0; padding: 0; }
+.task-form { margin-bottom: var(--s5); }
+.task-form h2 .task-id { font-size: var(--fs-h2); }
+.field-row { display: grid; gap: var(--s4); }
+.quick-dates { display: flex; flex-wrap: wrap; gap: 0 var(--s1); margin-top: var(--s1); }
+.quick-dates .btn { min-height: 32px; padding: 0 var(--s2); color: var(--accent-ink); }
+.push-end { margin-left: auto; }
+.cal-panel { display: grid; gap: var(--s3); margin-bottom: var(--s5); padding: var(--s5); border: 1px solid var(--control); border-radius: var(--r-lg); background: var(--surface); }
+.cal-panel h2 { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-h2); }
+.cal-panel p { max-width: 70ch; margin: 0; }
+.cal-panel .notice { max-width: none; }
+.cal-link { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); padding: var(--s2) var(--s2) var(--s2) var(--s3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--sunken); }
+.cal-link code { flex: 1 1 240px; min-width: 0; padding: 0; background: none; overflow-wrap: anywhere; user-select: all; }
 .switch input { width: 18px; height: 18px; accent-color: var(--accent-ink); }
 
 /* ============================================================== toasts */
@@ -522,7 +554,7 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
 .btn.quiet.danger-text:hover { background: var(--bad-soft); }
 .schedule-form { display: grid; gap: var(--s4); margin-bottom: var(--s6); padding: var(--s5); border: 1px solid var(--control); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--lift); }
 .schedule-form h2 { font-size: var(--fs-h2); }
-.field { display: grid; gap: var(--s1); }
+.field { display: grid; align-content: start; gap: var(--s1); } /* side by side, a taller neighbour must not stretch it */
 .chips { display: flex; flex-wrap: wrap; gap: var(--s1); }
 .chips .type-option span { border-color: var(--line); }
 .time-pick { display: flex; align-items: center; gap: var(--s2); }
@@ -540,6 +572,8 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
   .tasks td { display: table-cell; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); }
   .tasks td[data-label]:not(.task)::before { content: none; }
   .tasks td.check { position: static; width: 44px; padding-right: 0; }
+  .tasks td.edit { position: static; padding: var(--s1) 0; text-align: right; }
+  .field-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .tasks td.due { white-space: nowrap; }
   /* same column widths in every group, so due dates and owners line up down the page */
   .tasks table { table-layout: fixed; }
@@ -548,6 +582,7 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
   .tasks th:nth-child(4) { width: 19%; }
   .tasks th:nth-child(5) { width: 10%; }
   .tasks th:nth-child(6) { width: 17%; }
+  .tasks th:nth-child(7) { width: 48px; }
   .tasks td.due, .tasks td:nth-child(6) { white-space: normal; }
   .title-block { grid-template-columns: minmax(0, 1.1fr) minmax(0, 2fr) auto minmax(0, 1.2fr); }
   .title-block > div:nth-child(2n) { border-right: 1px solid var(--line); }
@@ -574,10 +609,12 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
   .job-grid { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: var(--s6); align-items: start; }
   .output { position: sticky; top: 76px; }
   .sheet .doc { max-height: calc(100vh - 290px); overflow: auto; }
+  .editor-text { height: calc(100vh - 330px); }
 }
 @media (pointer: coarse) {
   .btn, .nav a, .back, .switch, .check-option, select { min-height: 44px; }
   .type-option span { min-height: 44px; }
   .tabs button, .icon-btn { min-height: 44px; min-width: 44px; }
   .files li { min-height: 44px; }
+  .kbd-hint { display: none; } /* no keyboard shortcuts on a phone */
 }

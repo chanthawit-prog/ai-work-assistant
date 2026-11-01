@@ -228,6 +228,7 @@ class Runner:
         job_dir = self.store.job_dir(job_id)
         feedback = job.get("pending_feedback")
         new_files = list(job.get("pending_files") or [])
+        edited = list(job.get("pending_edits") or [])  # outputs you edited yourself since Claude last saw them
         resume = job.get("session_id") if feedback else None
         run_no = len(job["runs"]) + 1
         kind = "message" if feedback else ("retry" if job["runs"] else "initial")
@@ -236,14 +237,15 @@ class Runner:
         inputs = [f["path"] for f in self.store.list_files(job_id, "input")]
         context = self.prepare_context(job, job_type)
         prompt = task_message(job, job_type, self.settings, inputs, context, feedback=feedback, resumed=bool(resume),
-                              new_files=new_files)
+                              new_files=new_files, edited=edited)
         kb = self.kb_ready()
         cmd = self.build_command(job_type, resume_session=resume, kb=kb)
 
-        run = {"n": run_no, "kind": kind, "feedback": feedback, "files": new_files, "started_at": now_iso(),
-               "ended_at": None, "exit_code": None, "model": None, "result": None, "usage": {}}
-        self.store.update(job_id, status=RUNNING, runs=job["runs"] + [run], pending_feedback=None, pending_files=[], error=None,
-                          not_before=None, warnings=sorted(set(job.get("warnings", [])) | set(warnings)))
+        run = {"n": run_no, "kind": kind, "feedback": feedback, "files": new_files, "edited": edited,
+               "started_at": now_iso(), "ended_at": None, "exit_code": None, "model": None, "result": None, "usage": {}}
+        self.store.update(job_id, status=RUNNING, runs=job["runs"] + [run], pending_feedback=None, pending_files=[],
+                          pending_edits=[], error=None, not_before=None,
+                          warnings=sorted(set(job.get("warnings", [])) | set(warnings)))
         if kind == "retry":
             self._step(job_id, run_no, "app", "เริ่มทำงานนี้ใหม่อีกครั้ง")
         else:
@@ -409,6 +411,7 @@ class Runner:
                 if run["kind"] == "message":
                     job["pending_feedback"] = run.get("feedback")
                     job["pending_files"] = run.get("files") or []
+                job["pending_edits"] = sorted(set(job.get("pending_edits") or []) | set(run.get("edited") or []))
                 status, message = QUEUED, f"โควต้า subscription เต็ม ระบบจะเริ่มใหม่เองเวลา {resume_at:%H:%M}"
             else:
                 status, message = FAILED, "โควต้า subscription เต็มหลายรอบติดกัน"

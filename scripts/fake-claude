@@ -84,7 +84,10 @@ def main(argv: list) -> int:
     title_match = re.search(r"^ชื่องาน: (.+)$", prompt, re.M)
     title = title_match.group(1).strip() if title_match else "งานสาธิต"
     inputs = re.findall(r"^- (input/.+)$", prompt, re.M)
-    outputs = re.findall(r"^- (output/\S+)$", prompt, re.M)
+    outputs = list(dict.fromkeys(re.findall(r"^- (output/\S+)$", prompt, re.M)))
+    # outputs the user edited on the dashboard: build on their version instead of starting over
+    edited_block = re.search(r"^ผู้ใช้แก้ไฟล์ผลลัพธ์เหล่านี้ด้วยตนเอง[^\n]*\n((?:- output/\S+\n?)+)", prompt, re.M)
+    edited = set(re.findall(r"^- (output/\S+)$", edited_block.group(1), re.M)) if edited_block else set()
     cwd = Path.cwd()
     base = {"session_id": session}
     follow_up = re.search(r"^ข้อความใหม่จากผู้ใช้:\n(.+?)(?:\n\n|$)", prompt, re.M | re.S)
@@ -139,7 +142,10 @@ def main(argv: list) -> int:
             pause()
             path = cwd / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            content = sample_content(rel, title)
+            if rel in edited and path.is_file():
+                content = path.read_text("utf-8").rstrip("\n") + "\n"
+            else:
+                content = sample_content(rel, title)
             if follow_up and rel.endswith(".md"):
                 content += f"\n## ปรับตามข้อความล่าสุด\n- {follow_up.group(1).strip()}\n"
             path.write_text(content, encoding="utf-8")
