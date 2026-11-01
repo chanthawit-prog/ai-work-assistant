@@ -1,0 +1,37 @@
+# AI Work Assistant: dashboard + worker + the official Claude Code CLI in one container.
+# Claude does the processing in the cloud with your subscription; this container only stores files,
+# starts `claude -p` jobs and shows their progress.
+FROM node:22-bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DISABLE_AUTOUPDATER=1 \
+    TZ=Asia/Bangkok
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv tini ca-certificates tzdata ripgrep \
+ && rm -rf /var/lib/apt/lists/*
+
+# Claude Code, installed unmodified from Anthropic's npm package. Rebuild the image to update it.
+ARG CLAUDE_CODE_VERSION=latest
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} && npm cache clean --force
+
+WORKDIR /opt/app
+COPY requirements.txt .
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY app ./app
+COPY scripts ./scripts
+
+# HOME holds Claude Code's login and session history; mount it as a volume so it survives rebuilds.
+ENV PATH=/opt/venv/bin:$PATH \
+    HOME=/home/assistant \
+    DATA_DIR=/data \
+    KNOWLEDGE_DIR=/data/knowledge
+RUN mkdir -p /home/assistant /data/knowledge && chmod 0777 /home/assistant
+
+EXPOSE 8080
+HEALTHCHECK --interval=1m --timeout=10s --start-period=30s \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)" || exit 1
+ENTRYPOINT ["tini", "--"]
+CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]

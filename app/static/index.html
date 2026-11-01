@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Work Assistant</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧭</text></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">🧭</span>
+      <div>
+        <h1>AI Work Assistant</h1>
+        <p>ผู้ช่วยงานส่วนตัว · ประมวลผลด้วย Claude (subscription) · เก็บข้อมูลบน NAS</p>
+      </div>
+    </div>
+    <div class="chips" id="chips"></div>
+  </header>
+
+  <nav class="tabs">
+    <a href="#/" data-tab="jobs">งานทั้งหมด</a>
+    <a href="#/new" data-tab="new">➕ สร้างงาน</a>
+    <a href="#/tasks" data-tab="tasks">✅ ติดตามงาน <span id="taskCount" class="count"></span></a>
+  </nav>
+
+  <main id="view"></main>
+
+  <dialog id="loginHelp">
+    <h2>เชื่อม Claude subscription</h2>
+    <p>ระบบนี้ใช้ Claude Code ที่ติดตั้งใน container และล็อกอินด้วยบัญชี Claude ของคุณเอง เลือกวิธีใดวิธีหนึ่ง</p>
+    <ol>
+      <li><b>ล็อกอินใน container (แนะนำ)</b><br>
+        เปิด Terminal ของ container ใน Container Manager หรือ SSH เข้า NAS แล้วรัน
+        <pre>sudo docker exec -it ai-work-assistant claude auth login</pre>
+        เปิดลิงก์ที่แสดงในเบราว์เซอร์ ล็อกอิน แล้วนำรหัสที่ได้มาวางใน terminal</li>
+      <li><b>ใช้ token อายุ 1 ปี</b><br>
+        บนเครื่องที่มี Claude Code รัน <code>claude setup-token</code> แล้วใส่ค่าที่ได้ใน
+        <code>CLAUDE_CODE_OAUTH_TOKEN</code> ของไฟล์ <code>.env</code> จากนั้นสั่ง Build/Start project ใหม่</li>
+    </ol>
+    <p class="muted">หน้าเว็บนี้ไม่ขอและไม่เก็บรหัสผ่านหรือ token ของ Claude</p>
+    <div class="row-end">
+      <button type="button" class="btn" id="recheckClaude">ตรวจสอบอีกครั้ง</button>
+      <button type="button" class="btn primary" onclick="this.closest('dialog').close()">ปิด</button>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

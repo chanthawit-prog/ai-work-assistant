@@ -1,0 +1,17 @@
+# Synology Container Manager → Project → Create → choose this folder.
+# Paths and options come from .env (copy .env.example to .env first).
+services:
+  assistant:
+    build: .
+    image: ai-work-assistant:latest
+    container_name: ai-work-assistant
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Asia/Bangkok
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ${DATA_PATH:-./data}:/data
+      - ${KNOWLEDGE_PATH:-./knowledge}:/data/knowledge:ro   # read-only: Claude can read but never change it
+      - ${CLAUDE_HOME_PATH:-./claude-home}:/home/assistant   # Claude Code login + session history
