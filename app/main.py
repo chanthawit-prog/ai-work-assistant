@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from . import sysmon
 from .claude_status import check_claude
 from .config import Settings
 from .convert import READABLE_EXTS, prepare_inputs
@@ -31,12 +32,16 @@ from .store import AREAS, JOB_ID_RE, JobStore, now_iso, read_json
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
 MAX_TEXT_BYTES = 2 * 1024 * 1024
-CLAUDE_CHECK_EVERY = 600  # seconds
+MB = 1024 * 1024
+UPLOAD_CHUNK = MB
+# Each check starts the CLI twice (about 140 MB for a moment), so check every 30 minutes and never while a
+# job is running: a running job proves the login works anyway.
+CLAUDE_CHECK_EVERY = 1800  # seconds
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("assistant")
@@ -53,6 +58,44 @@ class MessageIn(BaseModel):
 
 class TaskStatusIn(BaseModel):
     status: str
+
+
+class UploadTooLarge(Exception):
+    pass
+
+
+def stage_uploads(staging: Path, uploads: list[UploadFile], max_bytes: int) -> list[tuple[str, Path]]:
+    """Copy uploads to disk 1 MB at a time. The multipart parser has already spooled each one to a temp
+    file; reading it whole with `await f.read()` would put the entire file in RAM, which a 6 GB NAS
+    pays for in swap."""
+    staging.mkdir(parents=True, exist_ok=True)
+    saved, total = [], 0
+    for i, upload in enumerate(uploads):
+        path = staging / f"{i:03d}.part"
+        upload.file.seek(0)
+        with open(path, "wb") as out:
+            while chunk := upload.file.read(UPLOAD_CHUNK):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UploadTooLarge
+                out.write(chunk)
+        saved.append((upload.filename, path))
+    return saved
+
+
+class UploadLimit:
+    """Refuse an oversized upload from its Content-Length, before the body is read or spooled anywhere."""
+
+    def __init__(self, app, max_bytes: int, message: str):
+        self.app, self.max_bytes, self.message = app, max_bytes, message
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST":
+            length = dict(scope["headers"]).get(b"content-length", b"")
+            if length.isdigit() and int(length) > self.max_bytes + 256 * 1024:  # room for the form fields
+                await JSONResponse({"detail": self.message}, status_code=413)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class BasicAuth(BaseHTTPMiddleware):
@@ -93,16 +136,40 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         return status
 
     async def claude_check_loop() -> None:
+        first = True
         while True:
             try:
-                await refresh_claude()
+                if first or not runner.active:  # always once at startup, then only while idle
+                    await refresh_claude()
             except Exception:
                 log.exception("claude status check failed")
+            first = False
             await asyncio.sleep(CLAUDE_CHECK_EVERY)
+
+    max_upload = settings.max_upload_mb * MB
+    too_large = f"ไฟล์ใหญ่เกินไป ส่งได้รวมไม่เกิน {settings.max_upload_mb} MB ต่อครั้ง (ตั้งได้ที่ MAX_UPLOAD_MB)"
+
+    async def receive_uploads(uploads: list[UploadFile]) -> tuple[Path | None, list[tuple[str, Path]]]:
+        """Stream uploads into a staging folder on the data volume (in a thread). The caller then moves them
+        into the job with plain renames, without awaiting, so the worker never sees a half-made job."""
+        if not uploads:
+            return None, []
+        if sum(u.size or 0 for u in uploads) > max_upload:
+            raise HTTPException(413, too_large)
+        staging = settings.state_dir / "uploads" / secrets.token_hex(8)
+        try:
+            return staging, await asyncio.to_thread(stage_uploads, staging, uploads, max_upload)
+        except UploadTooLarge:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise HTTPException(413, too_large) from None
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         settings.ensure_dirs()
+        shutil.rmtree(settings.state_dir / "uploads", ignore_errors=True)  # leftovers of an interrupted upload
         background = []
         if start_background:
             background = [asyncio.create_task(c) for c in
@@ -117,6 +184,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     app.state.tasks, app.state.inbox, app.state.scheduler, app.state.notifier = tasks, inbox, scheduler, notifier
     if settings.dashboard_password:
         app.add_middleware(BasicAuth, user=settings.dashboard_user, password=settings.dashboard_password)
+    app.add_middleware(UploadLimit, max_bytes=max_upload, message=too_large)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.exception_handler(KeyError)
@@ -141,6 +209,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             "started_at": last.get("started_at"),
             "ended_at": last.get("ended_at"),
             "last_step": runner.last_step.get(job["id"]),
+            "wait": runner.wait_info(job["id"]) if job.get("status") == "queued" else None,
         }
         if full:
             view.update({k: job.get(k) for k in ("session_id", "instructions", "review")})
@@ -167,8 +236,17 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             "counts": Counter(j.get("status") for j in jobs),
             "open_tasks": len(tasks.open_items()),
             "followup": {"time": settings.followup_time, "days": list(settings.followup_days)},
+            "memory": memory_summary(),
+            "limits": {"max_upload_mb": settings.max_upload_mb},
             "server_time": now_iso(),
         }
+
+    def memory_summary() -> dict | None:
+        host = sysmon.host_memory()
+        if host is None:
+            return None
+        need = settings.min_free_mem_mb
+        return {**host, "need_mb": need, "low": bool(need and host["available_mb"] < need)}
 
     @app.post("/api/claude/check")
     async def claude_check():
@@ -190,20 +268,26 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         if job_type is None:
             raise HTTPException(400, "ไม่รู้จักชนิดงานนี้")
         values = {"title": title.strip(), "instructions": instructions.strip(), "customer": customer.strip()}
-        uploads = [(f.filename, await f.read()) for f in files if f.filename]
+        uploads = [f for f in files if f.filename]
+        names = [f.filename for f in uploads]
         for field in job_type.fields:
-            if field.required and (not uploads if field.kind == "files" else not values.get(field.name)):
+            if field.required and (not names if field.kind == "files" else not values.get(field.name)):
                 raise HTTPException(400, f"กรุณากรอก: {field.label}")
-        if job_type.id == "meeting-summary" and not any(Path(n).suffix.lower() in READABLE_EXTS for n, _ in uploads):
+        if job_type.id == "meeting-summary" and not any(Path(n).suffix.lower() in READABLE_EXTS for n in names):
             raise HTTPException(400, "ต้องมีไฟล์ข้อความอย่างน้อย 1 ไฟล์ (.txt .vtt .srt .docx .pdf) — ไฟล์เสียงต้องถอดความก่อน")
         first_line = values["instructions"].split("\n")[0].strip()[:90]
-        stem = Path(uploads[0][0]).stem if uploads else ""
+        stem = Path(names[0]).stem if names else ""
         default_title = ((stem or first_line) if job_type.id == "meeting-summary" else (first_line or stem)) or job_type.label
         params = {"customer": values["customer"]} if values["customer"] else {}
-        # Create the job and write its files without awaiting in between, so the worker never sees it half-made.
-        job = store.create(job_type.id, values["title"] or default_title, values["instructions"], params)
-        for name, data in uploads:
-            store.add_file(job["id"], "input", name, data)
+        staging, staged = await receive_uploads(uploads)
+        try:
+            # Create the job and move its files in without awaiting in between, so the worker never sees it half-made.
+            job = store.create(job_type.id, values["title"] or default_title, values["instructions"], params)
+            for name, path in staged:
+                store.adopt_file(job["id"], "input", name, path)
+        finally:
+            if staging:
+                shutil.rmtree(staging, ignore_errors=True)
         warnings = prepare_inputs(store.area_dir(job["id"], "input"))
         if warnings:
             job = store.update(job["id"], warnings=warnings)
@@ -245,10 +329,16 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     async def message_job(job_id: str, message: str = Form(""), files: list[UploadFile] = File(default=[])):
         """A follow-up in the same job: text, files, or both. Claude resumes its earlier session."""
         runner.check_can_message(job_id)
-        uploads = [(f.filename, await f.read()) for f in files if f.filename]
+        uploads = [f for f in files if f.filename]
         if not message.strip() and not uploads:
             raise ValueError("พิมพ์ข้อความหรือแนบไฟล์ก่อนส่ง")
-        names = [store.add_file(job_id, "input", name, data) for name, data in uploads]
+        staging, staged = await receive_uploads(uploads)
+        try:
+            runner.check_can_message(job_id)  # still true after the upload?
+            names = [store.adopt_file(job_id, "input", name, path) for name, path in staged]
+        finally:
+            if staging:
+                shutil.rmtree(staging, ignore_errors=True)
         if names:
             warnings = prepare_inputs(store.area_dir(job_id, "input"))
             if warnings:
@@ -276,7 +366,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         modified = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
         data = await asyncio.to_thread(markdown_to_docx, md, title=job["title"], file_name=rel,
                                        rev=max(1, len(job.get("runs") or [])), modified=modified,
-                                       template=settings.report_template)
+                                       template=settings.report_template, embed_fonts=settings.docx_embed_fonts)
         filename = f"{slugify(job['title'])}_{Path(rel).stem}.docx"
         return Response(data, media_type=DOCX_TYPE, headers={
             "Content-Disposition": f"attachment; filename=\"export.docx\"; filename*=UTF-8''{quote(filename)}"})
@@ -315,7 +405,14 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
                         "jobs": sum(1 for p in jobs_dir.iterdir() if JOB_ID_RE.match(p.name)) if jobs_dir.exists() else 0,
                         "free_gb": round(disk.free / 1e9, 1) if disk else None,
                         "total_gb": round(disk.total / 1e9, 1) if disk else None,
-                        "report_template": settings.report_template.is_file()},
+                        "report_template": settings.report_template.is_file(),
+                        "embed_fonts": settings.docx_embed_fonts},
+            "memory": {**sysmon.snapshot(),
+                       "settings": {"min_free_mb": settings.min_free_mem_mb, "wait_max_min": settings.mem_wait_max_min,
+                                    "low_memory": settings.claude_low_memory, "max_upload_mb": settings.max_upload_mb,
+                                    "max_jobs": settings.max_concurrent_jobs},
+                       "runs": state.get("mem_runs") or [],
+                       "waiting": runner.wait_info(runner.mem_wait["job_id"]) if runner.mem_wait else None},
         }
 
     @app.post("/api/jobs/{job_id}/retry")

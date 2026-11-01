@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 from datetime import datetime
@@ -198,7 +199,8 @@ class JobStore:
         return sorted(ready, key=lambda j: j["id"])
 
     # -- files ---------------------------------------------------------------
-    def add_file(self, job_id: str, area: str, filename: str, data: bytes) -> str:
+    def _new_path(self, job_id: str, area: str, filename: str) -> Path:
+        """A safe, unused name: `ใบเสนอราคา.pdf`, then `ใบเสนอราคา (2).pdf` ..."""
         target_dir = self.area_dir(job_id, area)
         target_dir.mkdir(parents=True, exist_ok=True)
         name = safe_filename(filename)
@@ -209,8 +211,21 @@ class JobStore:
         while (target_dir / candidate).exists():
             candidate = f"{stem} ({n}){dot}{ext}" if dot else f"{name} ({n})"
             n += 1
-        (target_dir / candidate).write_bytes(data)
-        return candidate
+        return target_dir / candidate
+
+    def add_file(self, job_id: str, area: str, filename: str, data: bytes) -> str:
+        target = self._new_path(job_id, area, filename)
+        target.write_bytes(data)
+        return target.name
+
+    def adopt_file(self, job_id: str, area: str, filename: str, source: Path) -> str:
+        """Move a file that is already on disk (an upload streamed to a staging folder) into the job."""
+        target = self._new_path(job_id, area, filename)
+        try:
+            os.replace(source, target)
+        except OSError:  # staging folder on another file system
+            shutil.move(str(source), target)
+        return target.name
 
     def list_files(self, job_id: str, area: str) -> list[dict]:
         base = self.area_dir(job_id, area)

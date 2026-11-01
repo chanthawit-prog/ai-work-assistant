@@ -52,21 +52,37 @@
 |---|---|---|
 | ![](docs/screenshots/home.png) | ![](docs/screenshots/tasks.png) | ![](docs/screenshots/mobile.png) |
 
-| หน้าระบบ (การใช้งาน subscription จริง) | โหมดมืด |
+| หน้าระบบ: การใช้งาน subscription และหน่วยความจำ | โหมดมืด |
 |---|---|
 | ![](docs/screenshots/system.png) | ![](docs/screenshots/job-dark.png) |
 
-*ภาพจากการทดลองใช้งานจริงกับ Claude ข้อมูลลูกค้า ราคา และตารางสายไฟเป็นข้อมูลตัวอย่างสำหรับทดสอบ*
+*ภาพจากการทดลองใช้งานจริงกับ Claude ข้อมูลลูกค้า ราคา และตารางสายไฟเป็นข้อมูลตัวอย่างสำหรับทดสอบ
+ส่วนค่าหน่วยความจำในหน้าระบบเป็นค่าจำลองแบบ DS925+ RAM 6 GB ที่ swap เกือบเต็ม (RAM ที่งานใช้ 215–231 MB มาจากการวัดจริง)*
 
 ## ส่งออก Word, แจ้งเตือน และหน้าระบบ
 
-- **ดาวน์โหลด Word (.docx)** จากไฟล์ `.md` `.txt` และ `action_items.json` ได้ทุกไฟล์ จัดหน้า A4 ตัวอักษร
-  TH Sarabun New 16 pt หัวข้อสีน้ำเงินเข้ม ตารางหัวสีเทาแบบเอกสาร PEC และปิดท้ายด้วย title block
+- **ดาวน์โหลด Word (.docx)** จากไฟล์ `.md` `.txt` และ `action_items.json` ได้ทุกไฟล์ จัดหน้า A4 ฟอนต์ **Anuphan**
+  ขนาดตามตัวสร้างรายงานของ PEC (เนื้อความ 10 pt ตาราง 9 pt) หัวข้อสีน้ำเงินเข้ม ตารางหัวสีเทา และปิดท้ายด้วย title block
+  ฝังฟอนต์ไว้ในไฟล์ ลูกค้าที่ไม่มี Anuphan ก็เห็นเอกสารถูกต้อง
   ถ้าวาง `knowledge/templates/report-template.docx` ไว้ ระบบจะใช้หัวกระดาษ ท้ายกระดาษ โลโก้ และ style จากไฟล์นั้น
 - **แจ้งเตือน** เมื่องานรอตรวจ ไม่สำเร็จ หรือรอโควต้า ส่งไป Synology Chat, LINE (Messaging API) หรือ webhook ใดก็ได้
   พร้อมลิงก์เปิดงาน ตั้งค่าใน `.env` แล้วกด "ส่งข้อความทดสอบ" ในหน้าระบบ (วิธีตั้งค่าอยู่ใน [docs/setup-ds925.md](docs/setup-ds925.md))
 - **หน้าระบบ** แสดงสถานะการเชื่อม Claude, การใช้งาน subscription รอบ 5 ชั่วโมงและรายสัปดาห์, ช่องทางแจ้งเตือน,
-  ค่าการทำงาน และพื้นที่ว่างบน NAS
+  ค่าการทำงาน, หน่วยความจำ (RAM/swap ของ NAS, container และ RAM ที่แต่ละงานใช้) และพื้นที่ว่างบน NAS
+
+## ทำงานบน NAS ที่ RAM น้อย (DS925+ 6 GB)
+
+งานหนึ่งงาน Claude Code ใช้ RAM บน NAS ราว 200–300 MB (งานสรุปประชุมที่วัดจริงสูงสุด 220 MB) แต่ DS925+ ที่ swap เต็มง่าย
+ต้องไม่ให้งานมาซ้ำเติม ระบบจึง
+
+- **รอ RAM ว่างก่อนเริ่มงาน**: ถ้า RAM ว่างของ NAS ต่ำกว่า `MIN_FREE_MEM_MB` (700 MB) งานจะรอในคิวและบอกเหตุผลบนหน้าจอ
+- **จำกัด RAM ของ container** ที่ `MEM_LIMIT` (1.5 GB) และไม่ให้ใช้ swap งานที่เกินจะหยุดพร้อมข้อความ "หน่วยความจำไม่พอ"
+  ถ้า RAM ของทั้ง NAS หมด kernel จะหยุด Claude ก่อนบริการของ DSM
+- **ให้ Claude Code ใช้ RAM น้อยลง**: `BUN_OPTIONS=--smol`, `MALLOC_ARENA_MAX=2`, ไม่โหลด MCP server, ปิด telemetry
+- **ไม่เก็บไฟล์แนบไว้ใน RAM**: เขียนลงดิสก์ทีละ 1 MB และจำกัดขนาดรวมที่ `MAX_UPLOAD_MB`
+- **บันทึก RAM สูงสุดของทุกงาน** ให้ดูในหน้าระบบ ใช้ตัดสินใจว่าจะปรับเพดานหรือเพิ่ม RAM
+
+วิธีหาต้นเหตุ swap เต็มฝั่ง DSM อยู่ใน [docs/setup-ds925.md ข้อ 13](docs/setup-ds925.md#13-หน่วยความจำและ-swap-ram-6-gb)
 
 ## ชนิดงาน
 
@@ -156,7 +172,9 @@ dashboard จะขึ้นป้าย "โหมดสาธิต"
 - **ธีมสี Blue_650** ใช้ชุดสีเดียวกับเอกสารของบริษัท (token ใน PEC docx generator): Blue_650 `#183BB2`
   อยู่กึ่งกลางระหว่าง `BLUE_600 #1B43C8` กับ `BLUE_700 #15349C` ใช้กับปุ่มหลัก สิ่งที่เลือกอยู่ และสถานะที่กำลังทำ
   หัวหน้าจอใช้ `BLUE_800 #122A7B` แบบแถบหัวรายงาน พื้นใช้เทา PEC และสถานะใช้แดง/เขียว/เหลืองอำพันของ PEC
-- ฟอนต์เดียว **IBM Plex Sans Thai** เก็บไว้ในโปรเจกต์ (ใช้งานได้แม้ NAS ไม่ต่ออินเทอร์เน็ต, สัญญาอนุญาต SIL OFL ใน `app/static/fonts/OFL.txt`)
+- ฟอนต์เดียว **Anuphan** ฟอนต์ประจำของ PEC ทั้งภาษาไทยและอังกฤษ ทั้งบนหน้าจอและในไฟล์ Word เก็บไว้ในโปรเจกต์
+  (ใช้งานได้แม้ NAS ไม่ต่ออินเทอร์เน็ต, Cadson Demak, สัญญาอนุญาต SIL OFL ใน `app/static/fonts/OFL.txt`)
+  โค้ดใช้ฟอนต์ monospace ของเครื่อง โดยตัวอักษรไทยในโค้ดยังเป็น Anuphan
 - สีทุกคู่ผ่าน WCAG AA ทั้งโหมดสว่างและมืด, ปุ่มบนมือถือสูงอย่างน้อย 44 px, รองรับการลดภาพเคลื่อนไหว
 - ถ้าจะปรับหน้าตาต่อด้วย Impeccable ติดตั้งในโปรเจกต์ด้วย `npx impeccable install` หรือใน Claude Code
   `/plugin marketplace add pbakaus/impeccable` แล้วใช้คำสั่ง เช่น `/impeccable audit` หรือ `/impeccable polish`
@@ -176,7 +194,8 @@ DATA_DIR=./data KNOWLEDGE_DIR=./knowledge CLAUDE_BIN=./scripts/fake-claude \
 |---|---|
 | `app/runner.py` | สร้างคำสั่ง `claude -p` ส่งงาน อ่าน stream-json จัดการคิว ยกเลิก ลองใหม่ รอโควต้า และสั่งแจ้งเตือน |
 | `app/events.py` | แปลง event ของ Claude Code เป็นข้อความภาษาไทยบน timeline |
-| `app/export_docx.py` | แปลงผลงาน Markdown เป็น Word แบบเอกสาร PEC |
+| `app/export_docx.py` | แปลงผลงาน Markdown เป็น Word แบบเอกสาร PEC และฝังฟอนต์ Anuphan |
+| `app/sysmon.py` | อ่าน RAM/swap ของ NAS, เพดานของ container และ RAM ที่แต่ละงานใช้ |
 | `app/notify.py` | ส่งแจ้งเตือนไป Synology Chat, LINE และ webhook |
 | `app/store.py`, `app/tasks.py` | เก็บงานและ action item เป็นไฟล์บน NAS |
 | `app/watchers.py` | เฝ้าโฟลเดอร์ inbox และตั้งเวลางานติดตาม |

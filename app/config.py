@@ -46,6 +46,12 @@ class Settings:
     notify_line_api: str = "https://api.line.me/v2/bot/message/push"
     notify_webhook_url: str = ""
     notify_on: tuple[str, ...] = ("needs_review", "failed")
+    # memory: a DS925+ with 6 GB fills its swap easily, so jobs wait for free RAM and the CLI runs lean
+    min_free_mem_mb: int = 700              # start a job only when the NAS has this much RAM available (0 = off)
+    mem_wait_max_min: int = 20              # ... but after waiting this long, start anyway
+    claude_low_memory: bool = True          # BUN_OPTIONS=--smol, MALLOC_ARENA_MAX=2, no non-essential traffic
+    max_upload_mb: int = 200                # per request; uploads are streamed to disk, never held in RAM
+    docx_embed_fonts: bool = True           # embed Anuphan in Word exports
 
     @property
     def report_template(self) -> Path:
@@ -116,4 +122,9 @@ class Settings:
             notify_line_api=os.environ.get("NOTIFY_LINE_API", "").strip() or "https://api.line.me/v2/bot/message/push",
             notify_webhook_url=os.environ.get("NOTIFY_WEBHOOK_URL", "").strip(),
             notify_on=tuple(x.strip() for x in os.environ.get("NOTIFY_ON", "needs_review,failed").split(",") if x.strip()),
+            min_free_mem_mb=_int("MIN_FREE_MEM_MB", 700, minimum=0),
+            mem_wait_max_min=_int("MEM_WAIT_MAX_MIN", 20),
+            claude_low_memory=_bool("CLAUDE_LOW_MEMORY", True),
+            max_upload_mb=_int("MAX_UPLOAD_MB", 200),
+            docx_embed_fonts=_bool("DOCX_EMBED_FONTS", True),
         )

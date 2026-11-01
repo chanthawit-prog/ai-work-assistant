@@ -63,6 +63,16 @@ function fmtDuration(start, end) {
   if (s < 3600) return `${Math.floor(s / 60)} นาที ${s % 60} วินาที`;
   return `${Math.floor(s / 3600)} ชม. ${Math.floor((s % 3600) / 60)} นาที`;
 }
+const fmtMB = (mb) => (mb == null ? "—" : mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
+const memWaitText = (w) => `รอ RAM ของ NAS ว่าง (เหลือ ${fmtMB(w.available_mb)} ต้องการ ${fmtMB(w.need_mb)})`;
+/* the server refuses oversized uploads too (MAX_UPLOAD_MB); checking here saves sending them first */
+function tooBig(list) {
+  const limit = lastStatus && lastStatus.limits && lastStatus.limits.max_upload_mb;
+  const total = list.reduce((n, f) => n + f.size, 0) / 1048576;
+  if (!limit || total <= limit) return false;
+  toast(`ไฟล์รวม ${fmtMB(total)} เกินที่ตั้งไว้ ${limit} MB ต่อครั้ง (MAX_UPLOAD_MB)`, "bad");
+  return true;
+}
 function badge(status) {
   const [label, cls] = STATUS[status] || [status, "queued"];
   return `<span class="badge s-${cls}">${esc(label)}</span>`;
@@ -212,6 +222,10 @@ function renderStatus(s) {
     if (q.status === "rejected" && active) items.push(`<span class="pill bad"><i class="dot"></i>โควต้า${win}เต็ม${when ? ` · รีเซ็ต ${when}` : ""}</span>`);
     else if (q.status === "allowed_warning" && active) items.push(`<span class="pill warn" title="${esc(when ? `รีเซ็ต ${when}` : "")}"><i class="dot"></i>โควต้า${win}ใช้ไป${pct}</span>`);
     else items.push(`<span class="pill ok"><i class="dot"></i>โควต้าปกติ</span>`);
+  }
+  const m = s.memory;
+  if (m && m.low) {
+    items.push(`<a class="pill warn" href="#/system" title="งานใหม่จะรอจน RAM ว่างอย่างน้อย ${esc(fmtMB(m.need_mb))}"><i class="dot"></i>RAM NAS เหลือ ${esc(fmtMB(m.available_mb))}</a>`);
   }
   const n = s.counts || {};
   const busy = s.worker.active.length;
@@ -388,6 +402,7 @@ async function showHome() {
       "follow-up": `${t.label} ${new Date().toLocaleDateString("th-TH", { day: "numeric", month: "short" })}`,
     };
     const title = byType[t.id] || firstLine || stem || t.label;
+    if (tooBig(files)) return;
     const fd = new FormData();
     fd.append("type", t.id);
     fd.append("title", title);
@@ -424,6 +439,7 @@ function jobRow(j) {
   let extra = "";
   if (j.status === "running" && j.last_step) extra = `<span class="job-live">${esc(j.last_step)}</span>`;
   else if (j.status === "queued" && j.not_before) extra = `<span class="job-live">รอโควต้าถึง ${esc(fmtTime(j.not_before))}</span>`;
+  else if (j.status === "queued" && j.wait) extra = `<span class="job-live">${esc(memWaitText(j.wait))}</span>`;
   else if ((j.status === "failed" || j.status === "cancelled") && j.error) extra = `<span class="job-error">${esc(j.error)}</span>`;
   const took = j.started_at ? ` · ${fmtDuration(j.started_at, j.status === "running" ? null : j.ended_at)}` : "";
   return `<li><a class="job" href="#/job/${encodeURIComponent(j.id)}">
@@ -541,6 +557,7 @@ function showJob(id) {
     e.preventDefault();
     const text = replyText.value.trim();
     if (!text && !replyFiles.length) return replyText.focus();
+    if (tooBig(replyFiles)) return;
     const fd = new FormData();
     fd.append("message", text);
     replyFiles.forEach((f) => fd.append("files", f, f.name));
@@ -676,7 +693,9 @@ function renderLive(job, partial, steps) {
   } else if (job.status === "queued") {
     live.innerHTML = job.not_before
       ? `<p class="working wait">${icon("clock")}โควต้าเต็ม จะเริ่มเองเวลา ${esc(fmtTime(job.not_before))}</p>`
-      : `<p class="working wait">${icon("clock")}รอคิว Claude จะเริ่มเมื่อถึงคิว</p>`;
+      : job.wait
+        ? `<p class="working wait">${icon("clock")}${esc(memWaitText(job.wait))} จะเริ่มเองไม่เกิน ${esc(fmtClock(job.wait.start_by))}</p>`
+        : `<p class="working wait">${icon("clock")}รอคิว Claude จะเริ่มเมื่อถึงคิว</p>`;
   } else {
     live.innerHTML = "";
   }
@@ -910,10 +929,48 @@ function quotaWindows(q) {
   return list;
 }
 
+function memorySection(m) {
+  if (!m) return "";
+  const h = m.host;
+  const c = m.container;
+  const cfg = m.settings || {};
+  const meter = (label, pct, text) => {
+    const level = pct == null ? "" : pct >= 92 ? "bad" : pct >= 80 ? "warn" : "ok";
+    return `<li><div class="meter-head"><span>${esc(label)}</span><span class="num">${text}</span></div>
+      <div class="meter ${level}" role="img" aria-label="${esc(label)} ใช้ไป ${pct ?? 0}%"><span style="width:${Math.min(100, pct ?? 0)}%"></span></div></li>`;
+  };
+  const meters = [];
+  if (h) {
+    meters.push(meter("RAM ของ NAS", h.used_pct, `ใช้ไป ${h.used_pct}% · ว่าง ${esc(fmtMB(h.available_mb))} จาก ${esc(fmtMB(h.total_mb))}`));
+    if (h.swap_total_mb) meters.push(meter("Swap ของ NAS", h.swap_used_pct, `ใช้ไป ${h.swap_used_pct}% · ${esc(fmtMB(h.swap_used_mb))} จาก ${esc(fmtMB(h.swap_total_mb))}`));
+  }
+  if (c && c.limit_mb) meters.push(meter("Container นี้", Math.round((100 * c.used_mb) / c.limit_mb), `${esc(fmtMB(c.used_mb))} จากเพดาน ${esc(fmtMB(c.limit_mb))}`));
+  const runs = m.runs || [];
+  const last = runs[runs.length - 1];
+  const most = runs.reduce((a, r) => Math.max(a, r.peak_mb || 0), 0);
+  const row = (k, v) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
+  const notes = [];
+  if (m.waiting) notes.push(`<p class="notice warn">${icon("clock")}<span>${esc(memWaitText(m.waiting))} งานจะเริ่มเองไม่เกิน ${esc(fmtClock(m.waiting.start_by))}</span></p>`);
+  if (h && h.swap_used_pct >= 80) {
+    notes.push(`<p class="notice warn">${icon("alert")}<span>Swap ใช้ไป ${h.swap_used_pct}% ข้อมูลที่ย้ายลง swap ไปแล้วจะค้างอยู่จนกว่าจะถูกเรียกใช้ ตัวเลขนี้จึงสูงได้แม้ตอนนี้ RAM ว่าง
+      ถ้า NAS ช้าลงด้วย ให้ปิดแพ็กเกจที่ไม่ได้ใช้บน DSM หรือเพิ่ม RAM (ดู docs/setup-ds925.md หัวข้อหน่วยความจำ)</span></p>`);
+  }
+  return `<section class="sys-section"><h2>หน่วยความจำ</h2>${notes.join("")}
+    ${meters.length ? `<ul class="meters">${meters.join("")}</ul>` : `<p class="muted">อ่านข้อมูลหน่วยความจำของเครื่องนี้ไม่ได้</p>`}
+    <dl class="facts">
+      ${row("เริ่มงานเมื่อ RAM ว่างอย่างน้อย", cfg.min_free_mb ? `${esc(fmtMB(cfg.min_free_mb))} · รอไม่เกิน ${cfg.wait_max_min} นาที` : "ไม่ได้ตั้ง (เริ่มทันที)")}
+      ${row("เพดาน RAM ของ container", c ? (c.limit_mb ? esc(fmtMB(c.limit_mb)) : `<span class="muted">ไม่ได้จำกัด (ตั้ง MEM_LIMIT ใน .env)</span>`) : "ไม่ทราบ")}
+      ${row("Claude โหมดประหยัด RAM", cfg.low_memory ? "เปิด" : "ปิด")}
+      ${row("RAM ที่งานใช้สูงสุด", last ? `ล่าสุด ${esc(fmtMB(last.peak_mb))} · สูงสุดใน ${runs.length} งานหลังสุด ${esc(fmtMB(most))}` : `<span class="muted">จะแสดงหลังงานแรก</span>`)}
+      ${c && c.oom_kills ? row("ถูกหยุดเพราะ RAM เต็ม", `${c.oom_kills} ครั้ง ตั้งแต่ container เริ่ม`) : ""}
+      ${row("ไฟล์แนบต่อครั้ง", `ไม่เกิน ${cfg.max_upload_mb} MB`)}
+    </dl></section>`;
+}
+
 async function showSystem() {
   $("#view").innerHTML = `<section class="system" aria-labelledby="sysTitle">
       <div class="page-head"><div><h1 id="sysTitle">ระบบ</h1>
-        <p class="lede">สถานะการเชื่อมต่อ Claude การใช้งาน subscription การแจ้งเตือน และที่เก็บข้อมูลบน NAS</p></div></div>
+        <p class="lede">สถานะการเชื่อมต่อ Claude การใช้งาน subscription การแจ้งเตือน หน่วยความจำ และที่เก็บข้อมูลบน NAS</p></div></div>
       <div id="sysBody" aria-busy="true">${skeletonRows(3)}</div></section>`;
   const s = await api("/api/system");
   const c = s.claude || {};
@@ -955,10 +1012,13 @@ async function showSystem() {
       ${row("ติดตามงานอัตโนมัติ", s.followup.time ? `ทุก ${esc(s.followup.days.map((d) => DAYS[d] || d).join(" "))} เวลา ${esc(s.followup.time)}` : "ปิดอยู่")}
     </dl></section>
 
+    ${memorySection(s.memory)}
+
     <section class="sys-section"><h2>ที่เก็บข้อมูล</h2><dl class="facts">
       ${row("โฟลเดอร์งาน", `<code>${esc(s.storage.data_dir)}</code> · ${s.storage.jobs} งาน`)}
       ${row("คลังความรู้", `<code>${esc(s.storage.knowledge_dir)}</code> · ${s.storage.knowledge_files} ไฟล์`)}
       ${row("แม่แบบ Word", s.storage.report_template ? "ใช้ templates/report-template.docx" : `<span class="muted">ใช้รูปแบบตั้งต้น (วาง templates/report-template.docx เพื่อใช้หัวกระดาษบริษัท)</span>`)}
+      ${row("ฟอนต์ในไฟล์ Word", s.storage.embed_fonts ? "Anuphan ฝังในไฟล์ เปิดได้แม้เครื่องไม่มีฟอนต์" : "Anuphan (ไม่ฝัง เครื่องที่เปิดต้องติดตั้งฟอนต์)")}
       ${row("พื้นที่ว่าง", s.storage.free_gb != null ? `${s.storage.free_gb} GB จาก ${s.storage.total_gb} GB` : "ไม่ทราบ")}
       ${row("เวอร์ชัน", `AI Work Assistant ${esc(s.version.app)}`)}
     </dl></section>`;

@@ -29,8 +29,10 @@ tokens, not inverted.
   `GRAY_700 #344054`), which already lean blue; job states use PEC red, green and amber. Blue_650 marks the primary
   action, the current selection, focus and the live state only. Screens, Word exports, reports and decks now share
   one palette.
-- **Type: one family.** IBM Plex Sans Thai for everything (self-hosted, SIL OFL), Plex Mono only for code and file
-  paths. Fixed rem scale 13 / 14 / 16 / 18 / 26 px, line height 1.65 because Thai stacks marks above and below.
+- **Type: one family.** Anuphan, the PEC house font (Cadson Demak, self-hosted, SIL OFL), for Thai and Latin, on
+  screen and in Word exports. It has no monospace cut, so code and file paths use the system monospace font with
+  Anuphan filling in Thai. Fixed rem scale 13 / 14 / 16 / 18 / 26 px, line height 1.65 because Thai stacks marks
+  above and below.
 - **Density:** comfortable lists with dividers, no card grid.
 - **Signature move:** every output document is shown as a **drawing sheet with a title block** (file, job, Rev.,
   last modified, path on the NAS). Each follow-up round with Claude is a new revision, which is how engineers already
@@ -49,7 +51,10 @@ tokens, not inverted.
 
 - Works offline on the LAN: no CDN fonts or scripts.
 - Never collects Claude credentials; the setup help only explains Anthropic's own login steps.
-- Word exports follow the same palette and TH Sarabun New, the Thai office standard; a company template can replace it.
+- Word exports follow the same palette and Anuphan at PEC's report sizes (body 10 pt, tables 9 pt), with the font
+  embedded so recipients without it see the same document; a company template can replace the styles.
+- Runs on a NAS with little RAM (DS925+, 6 GB, swap fills easily): one job at a time, jobs wait for free RAM, the
+  container is capped and kept out of swap, and every run records its peak memory.
 - WCAG AA: body and placeholder text ≥ 4.5:1, control boundaries and focus ≥ 3:1 (checked in both themes).
 - Touch targets ≥ 44 px on coarse pointers; no horizontal scroll at 390 px.
 - Motion only for state (running indicator, toast, skeleton); a reduced-motion path keeps fades and drops loops.

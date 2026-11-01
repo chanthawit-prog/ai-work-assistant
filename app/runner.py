@@ -8,6 +8,14 @@ Subscription rules this module follows:
 * it never uses `--bare` (bare mode ignores subscription logins);
 * it removes ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the CLI environment, because an API key
   would take precedence over the subscription and be billed per token.
+
+Memory (a DS925+ with 6 GB fills its swap easily):
+* a job starts only when the NAS has MIN_FREE_MEM_MB of RAM available; otherwise it keeps its place in
+  the queue and starts anyway after MEM_WAIT_MAX_MIN, with a warning in its timeline;
+* the CLI runs with BUN_OPTIONS=--smol (the native Claude Code binary is built on Bun; --smol makes its
+  garbage collector run more often), MALLOC_ARENA_MAX=2, no non-essential traffic and no MCP servers;
+* each run records the peak memory of the CLI and its child processes, and a run killed for lack of
+  memory (OOM) gets a message that says so instead of a bare exit code.
 """
 from __future__ import annotations
 
@@ -15,11 +23,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import signal
+import time
 from asyncio.subprocess import PIPE
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from . import sysmon
 from .config import Settings
 from .convert import prepare_inputs
 from .events import RunMeta, summarize
@@ -36,15 +47,32 @@ MAX_QUOTA_WAITS = 3
 MAX_STDERR_LINES = 40
 BASE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
 MESSAGE_STATUSES = (NEEDS_REVIEW, DONE, FAILED, CANCELLED)  # states in which you can talk to Claude again
+MEM_FIRST_SAMPLE_SEC = 0.5  # skip the instant between exec and the runtime loading
+MEM_SAMPLE_SEC = 1
+MEM_HISTORY = 20
+OOM_TEXT = re.compile(r"out of memory|cannot allocate memory|allocation failed|ENOMEM", re.IGNORECASE)
+OOM_MESSAGES = {
+    "container": "หน่วยความจำไม่พอ: Claude ใช้ RAM ครบเพดานของ container (MEM_LIMIT) จึงถูกหยุดกลางคัน "
+                 "กด 'ลองใหม่' หรือเพิ่ม MEM_LIMIT ในไฟล์ .env",
+    "killed": "Claude ถูกระบบหยุดกลางคัน (SIGKILL) มักเกิดจาก RAM ของ NAS เต็ม "
+              "กด 'ลองใหม่' เมื่อ NAS ว่างขึ้น หรือปิดแอปที่ไม่ได้ใช้บน DSM",
+    "runtime": "Claude หยุดเพราะหน่วยความจำไม่พอ (out of memory) กด 'ลองใหม่' เมื่อ NAS ว่างขึ้น",
+}
 
 
-def claude_env() -> dict:
+def claude_env(low_memory: bool = True) -> dict:
     env = dict(os.environ)
     for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         env.pop(key, None)
     if not env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     env["DISABLE_AUTOUPDATER"] = "1"
+    if low_memory:
+        options = env.get("BUN_OPTIONS", "").split()
+        if "--smol" not in options:
+            env["BUN_OPTIONS"] = " ".join(options + ["--smol"])
+        env.setdefault("MALLOC_ARENA_MAX", "2")
+        env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")  # no telemetry, error reports, updater
     return env
 
 
@@ -61,6 +89,10 @@ class Runner:
         self.cancel_reasons: dict[str, str] = {}
         self.last_step: dict[str, str] = {}
         self.partial: dict[str, str] = {}  # text Claude is typing right now (from --include-partial-messages)
+        self.peak_mem: dict[str, int] = {}  # MB, CLI + child processes, for the run in progress
+        self.oom_hint: set[str] = set()     # jobs whose CLI printed "out of memory"
+        self.mem_wait: dict | None = None   # the job at the head of the queue waiting for free RAM
+        self.forced_start: dict[str, str] = {}
 
     # -- building a run ------------------------------------------------------
     def build_command(self, job_type: JobType, resume_session: str | None = None) -> list[str]:
@@ -76,6 +108,7 @@ class Runner:
             "--permission-prompts", "none",
             "--tools", ",".join(tools),
             "--allowedTools", ",".join(allowed),
+            "--strict-mcp-config",  # no MCP servers: none are needed, and each one is another process in RAM
             "--append-system-prompt", system_prompt(job_type, self.settings),
         ]
         if self.settings.knowledge_dir.is_dir():
@@ -156,15 +189,21 @@ class Runner:
             text = feedback if kind == "message" else self.request_text(job, job_type)
             self.store.append_step(job_id, {"run": run_no, "kind": "user", "text": text,
                                             "files": inputs if kind == "initial" else new_files})
+        forced = self.forced_start.pop(job_id, None)
+        if forced:
+            self._step(job_id, run_no, "warn", forced)
 
         meta = RunMeta()
+        oom_before = (sysmon.container_memory() or {}).get("oom_kills")
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=str(job_dir), env=claude_env(), stdin=PIPE, stdout=PIPE, stderr=PIPE, limit=STREAM_LIMIT)
+                *cmd, cwd=str(job_dir), env=claude_env(self.settings.claude_low_memory), stdin=PIPE, stdout=PIPE,
+                stderr=PIPE, limit=STREAM_LIMIT)
         except OSError as exc:
             self._finish(job_id, run_no, None, meta, error=f"เรียกคำสั่ง {self.settings.claude_bin} ไม่ได้: {exc}")
             return
         self.procs[job_id] = proc
+        mem_task = asyncio.create_task(self._watch_memory(job_id, proc))
         if job_id in self.cancel_reasons:  # cancelled while we were preparing
             asyncio.create_task(self._terminate(proc))
         try:
@@ -183,12 +222,36 @@ class Runner:
             self.cancel_reasons.setdefault(job_id, "timeout")
             await self._terminate(proc)
         exit_code = await proc.wait()
+        mem_task.cancel()
         try:
             await asyncio.wait_for(stderr_task, timeout=10)
         except asyncio.TimeoutError:
             stderr_task.cancel()
         self.procs.pop(job_id, None)
-        self._finish(job_id, run_no, exit_code, meta)
+        self._finish(job_id, run_no, exit_code, meta, oom=self._oom_reason(job_id, exit_code, oom_before))
+
+    async def _watch_memory(self, job_id: str, proc) -> None:
+        """Sample the memory of the CLI and the processes it starts (python3, rg ...); keep the peak.
+        The CLI itself counts at its high-water mark, so a peak between two samples is not missed."""
+        await asyncio.sleep(MEM_FIRST_SAMPLE_SEC)
+        while proc.returncode is None:
+            try:
+                mb = sysmon.process_tree_mb(proc.pid, root_peak=True)
+            except Exception:  # never let a reading break the job
+                mb = None
+            if mb:
+                self.peak_mem[job_id] = max(self.peak_mem.get(job_id, 0), mb)
+            await asyncio.sleep(MEM_SAMPLE_SEC)
+
+    def _oom_reason(self, job_id: str, exit_code: int | None, oom_before: int | None) -> str | None:
+        hinted = job_id in self.oom_hint
+        self.oom_hint.discard(job_id)
+        after = (sysmon.container_memory() or {}).get("oom_kills")
+        if oom_before is not None and after is not None and after > oom_before:
+            return "container"  # the kernel's OOM killer acted inside this container (MEM_LIMIT reached)
+        if exit_code in (-9, 137) and job_id not in self.cancel_reasons:
+            return "killed"  # SIGKILL that we did not send: usually the NAS ran out of memory
+        return "runtime" if hinted else None
 
     async def _read_stdout(self, job_id: str, run_no: int, proc, meta: RunMeta, job_dir: str) -> None:
         while True:
@@ -243,18 +306,22 @@ class Runner:
             if not raw:
                 return
             line = raw.decode("utf-8", errors="replace").rstrip()
+            if OOM_TEXT.search(line):
+                self.oom_hint.add(job_id)
             if line and shown < MAX_STDERR_LINES:
                 shown += 1
                 self.store.append_event(job_id, run_no, {"type": "_stderr", "text": line[:4000]})
                 self._step(job_id, run_no, "stderr", line[:300])
 
-    def _finish(self, job_id: str, run_no: int, exit_code: int | None, meta: RunMeta, error: str | None = None) -> None:
+    def _finish(self, job_id: str, run_no: int, exit_code: int | None, meta: RunMeta, error: str | None = None,
+                oom: str | None = None) -> None:
         job = self.store.get(job_id)
         job_type = JOB_TYPES[job["type"]]
         job_dir = self.store.job_dir(job_id)
         run = job["runs"][-1]
+        peak = self.peak_mem.pop(job_id, None)
         run.update(ended_at=now_iso(), exit_code=exit_code, model=meta.model, session_id=meta.session_id,
-                   result=(meta.result or {}).get("result"), usage=meta.usage_summary())
+                   result=(meta.result or {}).get("result"), usage=meta.usage_summary(), peak_mem_mb=peak)
         reason = self.cancel_reasons.pop(job_id, None)
 
         if error:
@@ -274,6 +341,8 @@ class Runner:
                 status, message = QUEUED, f"โควต้า subscription เต็ม ระบบจะเริ่มใหม่เองเวลา {resume_at:%H:%M}"
             else:
                 status, message = FAILED, "โควต้า subscription เต็มหลายรอบติดกัน"
+        elif oom and not meta.succeeded:
+            status, message = FAILED, OOM_MESSAGES[oom] + (f" (ใช้ไปสูงสุด {peak} MB)" if peak else "")
         elif not meta.succeeded or (exit_code or 0) != 0:
             message = meta.error_text() or (f"claude จบการทำงานด้วยรหัส {exit_code}" if exit_code else "")
             status, message = FAILED, message or "Claude ทำงานไม่สำเร็จ (ดูรายละเอียดใน events.jsonl)"
@@ -294,7 +363,12 @@ class Runner:
         usage = meta.usage_summary()
         if status == NEEDS_REVIEW and usage.get("duration_ms"):
             step["detail"] = f"{usage.get('num_turns') or '?'} turns · {round(usage['duration_ms'] / 1000)} วินาที"
+            if peak:
+                step["detail"] += f" · RAM สูงสุด {peak} MB"
         self.store.append_step(job_id, step)
+        if peak:
+            history = list(self.state.get("mem_runs") or [])[-(MEM_HISTORY - 1):]
+            self.state.set("mem_runs", history + [{"job": job_id, "peak_mb": peak, "status": status, "at": now_iso()}])
         self.last_step.pop(job_id, None)
         self._notify(job, {NEEDS_REVIEW: "needs_review", FAILED: "failed", QUEUED: "quota_wait"}.get(status))
         self.partial.pop(job_id, None)
@@ -403,22 +477,62 @@ class Runner:
         except Exception as exc:  # keep the worker alive whatever happens in one job
             log.exception("job %s crashed", job_id)
             self.procs.pop(job_id, None)
+            self.peak_mem.pop(job_id, None)
+            self.forced_start.pop(job_id, None)
             try:
                 self.store.update(job_id, status=FAILED, error=f"ข้อผิดพลาดภายในระบบ: {exc}")
             except Exception:
                 log.exception("could not mark job %s as failed", job_id)
 
+    def memory_gate(self, job_id: str) -> bool:
+        """True when this job may start now. While the NAS is short of RAM it keeps its place at the head
+        of the queue; after MEM_WAIT_MAX_MIN it starts anyway, with a warning in its timeline."""
+        need = self.settings.min_free_mem_mb
+        host = sysmon.host_memory() if need > 0 else None
+        if host is None or host["available_mb"] >= need:
+            self.mem_wait = None
+            return True
+        wait = self.mem_wait if self.mem_wait and self.mem_wait["job_id"] == job_id else None
+        if wait is None:
+            start_by = datetime.now().astimezone() + timedelta(minutes=self.settings.mem_wait_max_min)
+            wait = self.mem_wait = {"job_id": job_id, "since": now_iso(), "clock": time.monotonic(), "need_mb": need,
+                                    "start_by": start_by.isoformat(timespec="seconds")}
+            log.info("job %s waits for memory: %s MB available, %s MB wanted", job_id, host["available_mb"], need)
+        wait["available_mb"] = host["available_mb"]
+        if time.monotonic() - wait["clock"] < self.settings.mem_wait_max_min * 60:
+            return False
+        self.mem_wait = None
+        self.forced_start[job_id] = (f"เริ่มงานทั้งที่ RAM ของ NAS ว่างเพียง {host['available_mb']} MB "
+                                     f"(ตั้งไว้ {need} MB) เพราะรอครบ {self.settings.mem_wait_max_min} นาทีแล้ว")
+        return True
+
+    def wait_info(self, job_id: str) -> dict | None:
+        wait = self.mem_wait
+        if not wait or wait["job_id"] != job_id:
+            return None
+        return {"reason": "memory", **{k: wait.get(k) for k in ("available_mb", "need_mb", "since", "start_by")}}
+
+    def tick(self) -> None:
+        """One scheduling pass: start queued jobs while there is a free slot and enough RAM."""
+        free = self.settings.max_concurrent_jobs - len(self.active)
+        ready = self.store.runnable(datetime.now().astimezone()) if free > 0 else []
+        if self.mem_wait and self.mem_wait["job_id"] not in {j["id"] for j in ready}:
+            self.mem_wait = None  # cancelled, or a slot is busy again
+        for job in ready:
+            if free <= 0:
+                break
+            if job["id"] in self.active:
+                continue
+            if not self.memory_gate(job["id"]):
+                break  # keep the queue order; look again on the next tick
+            self._start(job["id"])
+            free -= 1
+
     async def loop(self) -> None:
         self.recover()
         while True:
             try:
-                free = self.settings.max_concurrent_jobs - len(self.active)
-                for job in self.store.runnable(datetime.now().astimezone()) if free > 0 else []:
-                    if free <= 0:
-                        break
-                    if job["id"] not in self.active:
-                        self._start(job["id"])
-                        free -= 1
+                self.tick()
             except Exception:
                 log.exception("worker loop error")
             await asyncio.sleep(2)

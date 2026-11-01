@@ -49,7 +49,9 @@ def test_docx_export_has_thai_fonts_tables_and_title_block():
     assert "สรุปประชุมโครงการ MDB" in body and "แก้ single line diagram" in body
     assert "Rev." in body and "summary.md" in body and "01/11/2026 10:00" in body
     rfonts = doc.styles["Normal"].element.rPr.find(qn("w:rFonts"))
-    assert rfonts.get(qn("w:cs")) == "TH Sarabun New"  # Thai is a complex script in Word
+    assert rfonts.get(qn("w:cs")) == "Anuphan"  # Thai is a complex script in Word
+    heading = doc.styles["Heading 1"].element.rPr.find(qn("w:rFonts"))
+    assert heading.get(qn("w:asciiTheme")) is None and heading.get(qn("w:ascii")) == "Anuphan"  # no theme font override
     assert doc.sections[0].page_width.cm > 20.9  # A4
     header_fill = doc.tables[0].cell(0, 0)._tc.tcPr.find(qn("w:shd")).get(qn("w:fill"))
     assert header_fill == "E4E7EC"

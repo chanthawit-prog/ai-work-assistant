@@ -15,8 +15,8 @@ from .runner import claude_env
 from .store import now_iso
 
 
-async def _run(cmd: list[str], timeout: int) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE, env=claude_env())
+async def _run(cmd: list[str], timeout: int, low_memory: bool = True) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE, env=claude_env(low_memory))
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -29,7 +29,7 @@ async def check_claude(settings: Settings) -> dict:
     status = {"checked_at": now_iso(), "installed": False, "logged_in": False,
               "method": None, "provider": None, "version": None, "error": None}
     try:
-        _, out = await _run([settings.claude_bin, "--version"], timeout=30)
+        _, out = await _run([settings.claude_bin, "--version"], timeout=30, low_memory=settings.claude_low_memory)
         status["installed"] = True
         status["version"] = (out.strip().splitlines() or [""])[0][:80]
     except FileNotFoundError:
@@ -39,7 +39,8 @@ async def check_claude(settings: Settings) -> dict:
         status["error"] = f"เรียก {settings.claude_bin} ไม่สำเร็จ: {exc!r}"
         return status
     try:
-        _, out = await _run([settings.claude_bin, "auth", "status", "--json"], timeout=30)
+        _, out = await _run([settings.claude_bin, "auth", "status", "--json"], timeout=30,
+                             low_memory=settings.claude_low_memory)
         data = json.loads(out)
         status["logged_in"] = bool(data.get("loggedIn"))
         status["method"] = data.get("authMethod")

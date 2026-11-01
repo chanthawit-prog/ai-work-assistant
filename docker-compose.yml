@@ -9,6 +9,14 @@ services:
     env_file: .env
     environment:
       TZ: Asia/Bangkok
+    # Memory. A DS925+ with 6 GB fills its swap easily, so:
+    # * cap this container (a typical job peaks at 200-300 MB; the System page shows real numbers),
+    # * memswap_limit = mem_limit: the container never uses swap, so its jobs cannot add to a full swap,
+    # * oom_score_adj: if the whole NAS runs out of memory, the kernel stops Claude before DSM services.
+    # If DSM says "Your kernel does not support swap limit", the cap still works, only without the swap part.
+    mem_limit: ${MEM_LIMIT:-1536m}
+    memswap_limit: ${MEM_LIMIT:-1536m}
+    oom_score_adj: 500
     ports:
       - "${PORT:-8080}:8080"
     volumes:
