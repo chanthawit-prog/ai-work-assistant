@@ -166,6 +166,7 @@ def test_command_uses_subscription_safely(parts, monkeypatch):
     assert cmd[cmd.index("--tools") + 1] == "Read,Write,Edit,Glob,Grep"
     eng = runner.build_command(JOB_TYPES["eng-qa"])
     assert "Bash(python3 *)" in eng[eng.index("--allowedTools") + 1]
+    assert "Bash(cd *)" in eng[eng.index("--allowedTools") + 1]
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
@@ -189,6 +190,13 @@ def test_summarize_events():
     tool = {"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
         {"type": "tool_use", "name": "Grep", "input": {"pattern": "cable", "path": "/data/knowledge"}}]}}
     assert summarize(tool, job_dir)[0]["text"] == "ค้นหาข้อความ “cable” ใน /data/knowledge"
+    assert summarize(tool, job_dir, "/data/knowledge")[0]["text"] == "ค้นหาข้อความ “cable” ใน knowledge"
+    glob = {"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
+        {"type": "tool_use", "name": "Glob", "input": {"pattern": "**/*", "path": "/data/jobs/x"}}]}}
+    assert summarize(glob, job_dir)[0]["text"] == "ค้นหาไฟล์ **/* ใน โฟลเดอร์งาน"
+    bash = {"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "cd /data/jobs/x/output && python3 calc.py /data/knowledge/a.csv"}}]}}
+    assert summarize(bash, job_dir, "/data/knowledge")[0]["text"] == "รันคำสั่ง: cd <โฟลเดอร์งาน>/output && python3 calc.py knowledge/a.csv"
     write = {"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
         {"type": "tool_use", "name": "Write", "input": {"file_path": "/data/jobs/x/output/a.md"}}]}}
     assert summarize(write, job_dir)[0]["text"] == "เขียนไฟล์ output/a.md"

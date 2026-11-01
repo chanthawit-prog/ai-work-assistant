@@ -18,10 +18,18 @@ def _trunc(text: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _short_path(path: Any, job_dir: str) -> str:
-    path = str(path or "")
-    prefix = job_dir.rstrip("/") + "/"
-    return path[len(prefix):] if path.startswith(prefix) else path
+def _short_path(path: Any, job_dir: str, knowledge_dir: str = "") -> str:
+    """Show paths the way the user knows them: relative to the job folder, or knowledge/..."""
+    path = str(path or "").rstrip("/")
+    jd = job_dir.rstrip("/")
+    if path == jd:
+        return "โฟลเดอร์งาน"
+    if path.startswith(jd + "/"):
+        return path[len(jd) + 1:]
+    kd = knowledge_dir.rstrip("/")
+    if kd and (path == kd or path.startswith(kd + "/")):
+        return "knowledge" + path[len(kd):]
+    return path
 
 
 def reset_time_text(resets_at: Any) -> str:
@@ -35,9 +43,9 @@ def reset_time_text(resets_at: Any) -> str:
     return datetime.fromtimestamp(ts).astimezone().strftime("%d/%m %H:%M")
 
 
-def describe_tool(name: str, inp: dict, job_dir: str) -> str:
+def describe_tool(name: str, inp: dict, job_dir: str, knowledge_dir: str = "") -> str:
     inp = inp if isinstance(inp, dict) else {}
-    path = _short_path(inp.get("file_path") or inp.get("path") or "", job_dir)
+    path = _short_path(inp.get("file_path") or inp.get("path") or "", job_dir, knowledge_dir)
     if name == "Read":
         return f"อ่านไฟล์ {path}"
     if name == "Write":
@@ -49,7 +57,10 @@ def describe_tool(name: str, inp: dict, job_dir: str) -> str:
     if name == "Grep":
         return f"ค้นหาข้อความ “{_trunc(inp.get('pattern', ''), 80)}”" + (f" ใน {path}" if path else "")
     if name == "Bash":
-        return f"รันคำสั่ง: {_trunc(inp.get('command', ''), 160)}"
+        command = str(inp.get("command", "")).replace(job_dir.rstrip("/"), "<โฟลเดอร์งาน>")
+        if knowledge_dir:
+            command = command.replace(knowledge_dir.rstrip("/"), "knowledge")
+        return f"รันคำสั่ง: {_trunc(command, 160)}"
     if name == "WebSearch":
         return f"ค้นเว็บ: {_trunc(inp.get('query', ''), 120)}"
     if name == "WebFetch":
@@ -67,7 +78,7 @@ def _tool_result_text(content: Any) -> str:
     return str(content or "")
 
 
-def summarize(event: dict, job_dir: str) -> list[dict]:
+def summarize(event: dict, job_dir: str, knowledge_dir: str = "") -> list[dict]:
     """Return zero or more {kind, text} steps for one stream-json event."""
     etype = event.get("type")
     sub = event.get("parent_tool_use_id") is not None
@@ -99,7 +110,7 @@ def summarize(event: dict, job_dir: str) -> list[dict]:
             if block.get("type") == "text" and str(block.get("text", "")).strip():
                 steps.append({"kind": "text", "text": prefix + _trunc(block["text"], 1200)})
             elif block.get("type") == "tool_use":
-                steps.append({"kind": "tool", "text": prefix + describe_tool(block.get("name", ""), block.get("input"), job_dir)})
+                steps.append({"kind": "tool", "text": prefix + describe_tool(block.get("name", ""), block.get("input"), job_dir, knowledge_dir)})
         if event.get("error"):
             steps.append({"kind": "warn", "text": f"Claude แจ้งข้อผิดพลาด: {event['error']}"})
         return steps

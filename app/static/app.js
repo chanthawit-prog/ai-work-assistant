@@ -273,6 +273,7 @@ function renderSetup(claude) {
 
 /* ---------------------------------------------------------------- home: composer + job lists */
 let showAllRecent = false;
+let jobQuery = "";
 
 async function showHome() {
   const types = await getJobTypes();
@@ -305,7 +306,16 @@ async function showHome() {
         </div>
       </form>
     </section>
+    <div class="list-tools">
+      <label class="search">${icon("search")}<span class="sr-only">ค้นหางาน</span>
+        <input type="search" id="jobSearch" placeholder="ค้นหางาน: ชื่องาน ลูกค้า หรือชนิดงาน" value="${esc(jobQuery)}" autocomplete="off"></label>
+    </div>
     <div id="lists" class="lists" aria-busy="true">${skeletonRows()}</div>`;
+  let lastJobs = null;
+  $("#jobSearch").addEventListener("input", (e) => {
+    jobQuery = e.target.value;
+    if (lastJobs) renderLists(lastJobs);
+  });
   if (lastStatus) renderSetup(lastStatus.claude);
 
   const form = $("#composer");
@@ -399,6 +409,7 @@ async function showHome() {
 
   poll(async () => {
     const jobs = await api("/api/jobs");
+    lastJobs = jobs;
     renderLists(jobs);
     return jobs.some((j) => j.status === "running" || j.status === "queued") ? 2000 : 6000;
   });
@@ -430,6 +441,15 @@ function renderLists(jobs) {
   const el = $("#lists");
   if (!el) return;
   el.removeAttribute("aria-busy");
+  const q = jobQuery.trim().toLowerCase();
+  if (q && jobs.length) {
+    const hits = jobs.filter((j) => [j.title, j.type_label, j.params && j.params.customer].filter(Boolean).join(" ").toLowerCase().includes(q));
+    el.innerHTML = hits.length
+      ? `<section class="group" aria-label="ผลการค้นหา"><h2>ผลการค้นหา <span class="group-count">${hits.length}</span></h2>
+          <ul class="job-list">${hits.map(jobRow).join("")}</ul></section>`
+      : `<div class="empty"><h2>ไม่พบงานที่ตรงกับ “${esc(jobQuery.trim())}”</h2><p>ลองค้นด้วยชื่อลูกค้า ชื่อไฟล์ หรือชนิดงาน เช่น สรุปประชุม</p></div>`;
+    return;
+  }
   if (!jobs.length) {
     el.innerHTML = `<div class="empty">
       <h2>ยังไม่มีงาน</h2>
@@ -466,8 +486,13 @@ function showJob(id) {
         <div class="live" id="live" aria-live="polite"></div>
         <label for="replyText" class="reply-label">ข้อความถึง Claude</label>
         <form class="reply" id="reply" novalidate>
-          <textarea id="replyText" rows="2"></textarea>
-          <button type="submit" class="btn primary" id="replySend" aria-label="ส่งข้อความ">${icon("arrow-up")}</button>
+          <ul class="attachments" id="replyFiles"></ul>
+          <div class="reply-row">
+            <button type="button" class="icon-btn" id="replyAttach" aria-label="แนบไฟล์">${icon("paperclip")}</button>
+            <input type="file" id="replyFileInput" multiple hidden>
+            <textarea id="replyText" rows="2"></textarea>
+            <button type="submit" class="btn primary" id="replySend" aria-label="ส่งข้อความ">${icon("arrow-up")}</button>
+          </div>
         </form>
         <p class="reply-hint" id="replyHint"></p>
       </section>
@@ -494,20 +519,46 @@ function showJob(id) {
   replyText.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) reply.requestSubmit();
   });
+  const replyFiles = [];
+  const renderReplyFiles = () => {
+    $("#replyFiles").innerHTML = replyFiles.map((f, i) => `<li>${icon("file")}<span>${esc(f.name)}</span>
+      <button type="button" class="icon-btn" data-remove="${i}" aria-label="เอาไฟล์ ${esc(f.name)} ออก">${icon("x")}</button></li>`).join("");
+  };
+  $("#replyAttach").onclick = () => $("#replyFileInput").click();
+  $("#replyFileInput").onchange = (e) => { replyFiles.push(...e.target.files); e.target.value = ""; renderReplyFiles(); };
+  $("#replyFiles").onclick = (e) => {
+    const b = e.target.closest("[data-remove]");
+    if (b) { replyFiles.splice(Number(b.dataset.remove), 1); renderReplyFiles(); }
+  };
+  reply.addEventListener("dragover", (e) => { e.preventDefault(); reply.classList.add("dropping"); });
+  reply.addEventListener("dragleave", () => reply.classList.remove("dropping"));
+  reply.addEventListener("drop", (e) => {
+    e.preventDefault();
+    reply.classList.remove("dropping");
+    if (!replyText.disabled) { replyFiles.push(...e.dataTransfer.files); renderReplyFiles(); }
+  });
   reply.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = replyText.value.trim();
-    if (!text) return replyText.focus();
-    $("#replySend").disabled = true;
+    if (!text && !replyFiles.length) return replyText.focus();
+    const fd = new FormData();
+    fd.append("message", text);
+    replyFiles.forEach((f) => fd.append("files", f, f.name));
+    const send = $("#replySend");
+    send.disabled = true;
+    send.classList.add("busy");
     try {
-      await postJSON(`/api/jobs/${encodeURIComponent(id)}/messages`, { message: text });
+      await api(`/api/jobs/${encodeURIComponent(id)}/messages`, { method: "POST", body: fd });
       replyText.value = "";
       replyText.dispatchEvent(new Event("input"));
+      replyFiles.length = 0;
+      renderReplyFiles();
       headSig = "";
     } catch (err) {
       toast(err.message, "bad");
     }
-    $("#replySend").disabled = false;
+    send.classList.remove("busy");
+    send.disabled = false;
   });
   $("#thread").addEventListener("toggle", (e) => {
     const key = e.target.dataset && e.target.dataset.group;
@@ -646,6 +697,7 @@ function renderReplyState(job) {
   text.placeholder = placeholder;
   text.disabled = !job.can_message;
   send.disabled = !job.can_message;
+  $("#replyAttach").disabled = !job.can_message;
   $("#replyHint").textContent = hint;
 }
 
@@ -742,7 +794,9 @@ async function loadOutput(jobId, file, job) {
         <div class="rev"><dt>Rev.</dt><dd>${esc(job && job.runs ? job.runs.length : 1)}</dd></div>
         <div><dt>แก้ไขล่าสุด</dt><dd class="num">${esc(fmtTime(file.modified))}</dd></div>
         <div class="path"><code>jobs/${esc(jobId)}/output/${esc(path)}</code>
-          <a href="${fileUrl(jobId, "output", path, true)}" target="_blank" rel="noopener">${icon("download")}เปิดไฟล์</a></div>
+          <span class="doc-links">${/\.(md|txt)$/i.test(path) || path.endsWith("action_items.json")
+            ? `<a href="/api/jobs/${encodeURIComponent(jobId)}/export/${path.split("/").map(encodeURIComponent).join("/")}" download>${icon("word")}ดาวน์โหลด Word</a>` : ""}
+          <a href="${fileUrl(jobId, "output", path, true)}" target="_blank" rel="noopener">${icon("download")}เปิดไฟล์</a></span></div>
       </dl>`;
     if (f.binary) {
       view.innerHTML = `<div class="doc"><p>ไฟล์ชนิดนี้แสดงในหน้าเว็บไม่ได้ กดเปิดไฟล์ด้านล่างเพื่อดาวน์โหลด</p></div>${block}`;
@@ -844,11 +898,95 @@ function renderTasks(items) {
   }));
 }
 
+/* ---------------------------------------------------------------- system */
+const CHANNELS = { synology: "Synology Chat", line: "LINE", webhook: "Webhook" };
+const EVENTS = { needs_review: "งานรอตรวจ", failed: "งานไม่สำเร็จ", quota_wait: "โควต้าเต็ม" };
+
+function quotaWindows(q) {
+  if (!q) return [];
+  const w = q.unifiedWindows && typeof q.unifiedWindows === "object" ? Object.entries(q.unifiedWindows) : [];
+  const list = w.map(([name, v]) => ({ name, ...(v && typeof v === "object" ? v : {}) }));
+  if (!list.length && (q.utilization != null || q.rateLimitType)) list.push({ name: q.rateLimitType || "current", utilization: q.utilization, resetsAt: q.resetsAt });
+  return list;
+}
+
+async function showSystem() {
+  $("#view").innerHTML = `<section class="system" aria-labelledby="sysTitle">
+      <div class="page-head"><div><h1 id="sysTitle">ระบบ</h1>
+        <p class="lede">สถานะการเชื่อมต่อ Claude การใช้งาน subscription การแจ้งเตือน และที่เก็บข้อมูลบน NAS</p></div></div>
+      <div id="sysBody" aria-busy="true">${skeletonRows(3)}</div></section>`;
+  const s = await api("/api/system");
+  const c = s.claude || {};
+  const windows = quotaWindows(s.quota);
+  const pct = (u) => (typeof u === "number" ? Math.round(u <= 1 ? u * 100 : u) : null);
+  const resetText = (t) => (t ? fmtTime(new Date((t > 1e12 ? t : t * 1000)).toISOString()) : "");
+  const row = (k, v) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
+  $("#sysBody").removeAttribute("aria-busy");
+  $("#sysBody").innerHTML = `
+    <section class="sys-section"><h2>Claude</h2><dl class="facts">
+      ${row("สถานะ", c.logged_in ? `<span class="badge s-done">เชื่อมต่อแล้ว</span>` : `<span class="badge s-failed">ยังไม่ได้เชื่อม</span>`)}
+      ${row("วิธีล็อกอิน", esc(c.method || "ยังไม่ทราบ"))}
+      ${row("Claude Code", esc(c.version || "ยังไม่ทราบ"))}
+      ${row("model / effort", esc(`${s.worker.model || "ค่าตั้งต้นของแพ็กเกจ"} / ${s.worker.effort || "ค่าตั้งต้น"}`))}
+      ${row("ตรวจล่าสุด", esc(fmtTime(c.checked_at) || "ยังไม่ได้ตรวจ"))}
+    </dl><button type="button" class="btn" id="sysCheck">${icon("retry")}ตรวจสอบการเชื่อมต่อ</button></section>
+
+    <section class="sys-section"><h2>การใช้งาน subscription</h2>
+      ${windows.length ? `<ul class="meters">${windows.map((w) => {
+        const p = pct(w.utilization);
+        const level = p == null ? "" : p >= 95 ? "bad" : p >= 75 ? "warn" : "ok";
+        return `<li><div class="meter-head"><span>${esc(QUOTA_WINDOWS[w.name] || w.name)}</span>
+          <span class="num">${p == null ? "ไม่มีข้อมูล" : `ใช้ไป ${p}%`}${w.resetsAt ? ` · รีเซ็ต ${esc(resetText(w.resetsAt))}` : ""}</span></div>
+          <div class="meter ${level}" role="img" aria-label="ใช้ไป ${p ?? 0}%"><span style="width:${Math.min(100, p ?? 0)}%"></span></div></li>`;
+      }).join("")}</ul><p class="small muted">ข้อมูลจาก Claude Code ตอนงานล่าสุด (${esc(fmtTime(s.quota.seen_at))})</p>`
+      : `<p class="muted">ยังไม่มีข้อมูล จะแสดงหลังจาก Claude ทำงานชิ้นแรก</p>`}</section>
+
+    <section class="sys-section"><h2>การแจ้งเตือน</h2><dl class="facts">
+      ${row("ช่องทาง", s.notify.channels.length ? s.notify.channels.map((x) => esc(CHANNELS[x] || x)).join(", ") : `<span class="muted">ยังไม่ได้ตั้งค่า</span>`)}
+      ${row("แจ้งเมื่อ", s.notify.on.map((x) => esc(EVENTS[x] || x)).join(", "))}
+      ${row("ลิงก์ในข้อความ", s.notify.dashboard_url ? `<code>${esc(s.notify.dashboard_url)}</code>` : `<span class="muted">ตั้ง DASHBOARD_URL เพื่อให้กดเปิดงานได้</span>`)}
+    </dl>${s.notify.channels.length ? `<button type="button" class="btn" id="sysNotify">${icon("bell")}ส่งข้อความทดสอบ</button>`
+      : `<p class="small muted">ตั้งค่า NOTIFY_SYNOLOGY_CHAT_URL, NOTIFY_LINE_TOKEN + NOTIFY_LINE_TO หรือ NOTIFY_WEBHOOK_URL ในไฟล์ .env แล้วสั่ง Build ใหม่</p>`}</section>
+
+    <section class="sys-section"><h2>การทำงาน</h2><dl class="facts">
+      ${row("ทำพร้อมกันสูงสุด", `${s.worker.max} งาน`)}
+      ${row("หมดเวลาต่องาน", `${s.worker.timeout_min} นาที`)}
+      ${row("ให้ Claude รัน python3", s.worker.allow_python ? "ได้ (งานวิศวกรรมและใบเสนอราคา)" : "ไม่ได้")}
+      ${row("ติดตามงานอัตโนมัติ", s.followup.time ? `ทุก ${esc(s.followup.days.map((d) => DAYS[d] || d).join(" "))} เวลา ${esc(s.followup.time)}` : "ปิดอยู่")}
+    </dl></section>
+
+    <section class="sys-section"><h2>ที่เก็บข้อมูล</h2><dl class="facts">
+      ${row("โฟลเดอร์งาน", `<code>${esc(s.storage.data_dir)}</code> · ${s.storage.jobs} งาน`)}
+      ${row("คลังความรู้", `<code>${esc(s.storage.knowledge_dir)}</code> · ${s.storage.knowledge_files} ไฟล์`)}
+      ${row("แม่แบบ Word", s.storage.report_template ? "ใช้ templates/report-template.docx" : `<span class="muted">ใช้รูปแบบตั้งต้น (วาง templates/report-template.docx เพื่อใช้หัวกระดาษบริษัท)</span>`)}
+      ${row("พื้นที่ว่าง", s.storage.free_gb != null ? `${s.storage.free_gb} GB จาก ${s.storage.total_gb} GB` : "ไม่ทราบ")}
+      ${row("เวอร์ชัน", `AI Work Assistant ${esc(s.version.app)}`)}
+    </dl></section>`;
+  $("#sysCheck").addEventListener("click", async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const r = await postJSON("/api/claude/check");
+      toast(r.logged_in ? "เชื่อมต่อ Claude ได้แล้ว" : `ยังเชื่อมไม่ได้: ${r.error || "ดูวิธีเชื่อมที่หน้าแรก"}`, r.logged_in ? "" : "bad");
+    } catch (err) { toast(err.message, "bad"); }
+    route();
+  });
+  const notifyBtn = $("#sysNotify");
+  if (notifyBtn) notifyBtn.addEventListener("click", async () => {
+    notifyBtn.disabled = true;
+    try {
+      const r = await postJSON("/api/notify/test");
+      const failed = Object.entries(r).filter(([, v]) => v !== "ok");
+      toast(failed.length ? `ส่งไม่สำเร็จ: ${failed.map(([k, v]) => `${CHANNELS[k] || k} (${v})`).join(", ")}` : "ส่งข้อความทดสอบแล้ว", failed.length ? "bad" : "");
+    } catch (err) { toast(err.message, "bad"); }
+    notifyBtn.disabled = false;
+  });
+}
+
 /* ---------------------------------------------------------------- router */
 function route() {
   viewToken += 1;
   const hash = location.hash || "#/";
-  const tab = hash.startsWith("#/tasks") ? "tasks" : "jobs";
+  const tab = hash.startsWith("#/tasks") ? "tasks" : hash.startsWith("#/system") ? "system" : "jobs";
   $$(".nav a").forEach((a) => {
     const on = a.dataset.tab === tab;
     a.classList.toggle("active", on);
@@ -860,6 +998,7 @@ function route() {
   const fail = (err) => ($("#view").innerHTML = `<p class="muted">${esc(err.message)}</p>`);
   if (hash.startsWith("#/job/")) return showJob(decodeURIComponent(hash.slice(6)));
   if (hash.startsWith("#/tasks")) return showTasks();
+  if (hash.startsWith("#/system")) return showSystem().catch(fail);
   return showHome().catch(fail);
 }
 

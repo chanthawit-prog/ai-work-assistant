@@ -49,7 +49,9 @@ def claude_env() -> dict:
 
 
 class Runner:
-    def __init__(self, store: JobStore, tasks: TaskStore, state: RuntimeState, settings: Settings):
+    def __init__(self, store: JobStore, tasks: TaskStore, state: RuntimeState, settings: Settings, notifier=None):
+        self.notifier = notifier
+        self._background: set[asyncio.Task] = set()
         self.store = store
         self.tasks = tasks
         self.state = state
@@ -65,7 +67,8 @@ class Runner:
         tools, allowed = list(BASE_TOOLS), list(BASE_TOOLS)
         if job_type.allow_python and self.settings.allow_python:
             tools.append("Bash")
-            allowed.append("Bash(python3 *)")
+            # Claude often writes `cd <job folder> && python3 ...`; each part of a chain must match a rule
+            allowed += ["Bash(python3 *)", "Bash(cd *)"]
         cmd = [
             self.settings.claude_bin, "-p",
             "--output-format", "stream-json", "--verbose", "--include-partial-messages",
@@ -131,6 +134,7 @@ class Runner:
             return
         job_dir = self.store.job_dir(job_id)
         feedback = job.get("pending_feedback")
+        new_files = list(job.get("pending_files") or [])
         resume = job.get("session_id") if feedback else None
         run_no = len(job["runs"]) + 1
         kind = "message" if feedback else ("retry" if job["runs"] else "initial")
@@ -138,19 +142,20 @@ class Runner:
         warnings = prepare_inputs(job_dir / "input")
         inputs = [f["path"] for f in self.store.list_files(job_id, "input")]
         context = self.prepare_context(job, job_type)
-        prompt = task_message(job, job_type, self.settings, inputs, context, feedback=feedback, resumed=bool(resume))
+        prompt = task_message(job, job_type, self.settings, inputs, context, feedback=feedback, resumed=bool(resume),
+                              new_files=new_files)
         cmd = self.build_command(job_type, resume_session=resume)
 
-        run = {"n": run_no, "kind": kind, "feedback": feedback, "started_at": now_iso(), "ended_at": None,
-               "exit_code": None, "model": None, "result": None, "usage": {}}
-        self.store.update(job_id, status=RUNNING, runs=job["runs"] + [run], pending_feedback=None, error=None,
+        run = {"n": run_no, "kind": kind, "feedback": feedback, "files": new_files, "started_at": now_iso(),
+               "ended_at": None, "exit_code": None, "model": None, "result": None, "usage": {}}
+        self.store.update(job_id, status=RUNNING, runs=job["runs"] + [run], pending_feedback=None, pending_files=[], error=None,
                           not_before=None, warnings=sorted(set(job.get("warnings", [])) | set(warnings)))
         if kind == "retry":
             self._step(job_id, run_no, "app", "เริ่มทำงานนี้ใหม่อีกครั้ง")
         else:
             text = feedback if kind == "message" else self.request_text(job, job_type)
             self.store.append_step(job_id, {"run": run_no, "kind": "user", "text": text,
-                                            "files": inputs if kind == "initial" else []})
+                                            "files": inputs if kind == "initial" else new_files})
 
         meta = RunMeta()
         try:
@@ -217,7 +222,7 @@ class Runner:
                 self.store.update(job_id, session_id=meta.session_id)
             if event.get("type") == "rate_limit_event":
                 self.state.set_quota(event.get("rate_limit_info") or {})
-            for step in summarize(event, job_dir):
+            for step in summarize(event, job_dir, str(self.settings.knowledge_dir)):
                 self._step(job_id, run_no, step["kind"], step["text"])
 
     def _track_partial(self, job_id: str, event: dict) -> None:
@@ -265,6 +270,7 @@ class Runner:
                 job["not_before"] = resume_at.isoformat(timespec="seconds")
                 if run["kind"] == "message":
                     job["pending_feedback"] = run.get("feedback")
+                    job["pending_files"] = run.get("files") or []
                 status, message = QUEUED, f"โควต้า subscription เต็ม ระบบจะเริ่มใหม่เองเวลา {resume_at:%H:%M}"
             else:
                 status, message = FAILED, "โควต้า subscription เต็มหลายรอบติดกัน"
@@ -290,7 +296,18 @@ class Runner:
             step["detail"] = f"{usage.get('num_turns') or '?'} turns · {round(usage['duration_ms'] / 1000)} วินาที"
         self.store.append_step(job_id, step)
         self.last_step.pop(job_id, None)
+        self._notify(job, {NEEDS_REVIEW: "needs_review", FAILED: "failed", QUEUED: "quota_wait"}.get(status))
         self.partial.pop(job_id, None)
+
+    def _notify(self, job: dict, event: str | None) -> None:
+        if not event or self.notifier is None or not self.notifier.channels:
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(self.notifier.job_event(job, event))
+        except RuntimeError:  # no loop (sync callers in tests)
+            return
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     @staticmethod
     def _check_outputs(job_dir, job_type: JobType) -> list[str]:
@@ -343,17 +360,23 @@ class Runner:
         return self.store.update(job_id, status=QUEUED, session_id=None, error=None, not_before=None,
                                  quota_waits=0, pending_feedback=None)
 
-    def send_message(self, job_id: str, message: str) -> dict:
-        """Talk to Claude again in the same job: ask a follow-up, request changes, or continue after a failure.
-        Claude resumes its earlier session, so it remembers the files and the conversation."""
+    def check_can_message(self, job_id: str) -> dict:
         job = self.store.get(job_id)
         if job is None:
             raise KeyError(job_id)
         if job["status"] not in MESSAGE_STATUSES:
             raise ValueError("ส่งข้อความได้เมื่อ Claude ทำรอบปัจจุบันเสร็จแล้ว")
-        if not message.strip():
-            raise ValueError("พิมพ์ข้อความก่อนส่ง")
-        return self.store.update(job_id, status=QUEUED, pending_feedback=message.strip(), error=None,
+        return job
+
+    def send_message(self, job_id: str, message: str, files: list[str] | None = None) -> dict:
+        """Talk to Claude again in the same job: ask a follow-up, request changes, or continue after a failure.
+        Claude resumes its earlier session, so it remembers the files and the conversation."""
+        self.check_can_message(job_id)
+        files = list(files or [])
+        if not message.strip() and not files:
+            raise ValueError("พิมพ์ข้อความหรือแนบไฟล์ก่อนส่ง")
+        text = message.strip() or "ดูไฟล์ที่แนบมาเพิ่ม แล้วปรับผลลัพธ์ให้สอดคล้อง"
+        return self.store.update(job_id, status=QUEUED, pending_feedback=text, pending_files=files, error=None,
                                  not_before=None, quota_waits=0)
 
     revise = send_message

@@ -23,9 +23,12 @@ tokens, not inverted.
 
 - **Mode: Operate.** The visitor is in a task. Scanability, consistency and standard controls come first; the brand
   lives in precise details.
-- **Colour strategy: Restrained, with a committed shell.** Slate-tinted neutrals (hue ≈ 228), a slate header,
-  and one accent: **safety orange**, as on site hi-vis gear, with dark text on it. The accent marks the primary
-  action, the current selection and state counts only. Job states use their own semantic colours.
+- **Colour strategy: the company palette (PEC document tokens), Blue_650 as the one accent.** Blue_650 =
+  `oklch(0.417 0.191 265.3)` = `#183BB2`, the OKLCH midpoint of PEC `BLUE_600 #1B43C8` and `BLUE_700 #15349C`.
+  The header uses `BLUE_800 #122A7B`, the banner blue of PEC reports; neutrals are PEC greys (`GRAY_100 #F2F4F8`,
+  `GRAY_700 #344054`), which already lean blue; job states use PEC red, green and amber. Blue_650 marks the primary
+  action, the current selection, focus and the live state only. Screens, Word exports, reports and decks now share
+  one palette.
 - **Type: one family.** IBM Plex Sans Thai for everything (self-hosted, SIL OFL), Plex Mono only for code and file
   paths. Fixed rem scale 13 / 14 / 16 / 18 / 26 px, line height 1.65 because Thai stacks marks above and below.
 - **Density:** comfortable lists with dividers, no card grid.
@@ -46,6 +49,7 @@ tokens, not inverted.
 
 - Works offline on the LAN: no CDN fonts or scripts.
 - Never collects Claude credentials; the setup help only explains Anthropic's own login steps.
+- Word exports follow the same palette and TH Sarabun New, the Thai office standard; a company template can replace it.
 - WCAG AA: body and placeholder text ≥ 4.5:1, control boundaries and focus ≥ 3:1 (checked in both themes).
 - Touch targets ≥ 44 px on coarse pointers; no horizontal scroll at 390 px.
 - Motion only for state (running indicator, toast, skeleton); a reduced-motion path keeps fades and drops loops.

@@ -46,8 +46,8 @@ def test_create_run_view_and_approve_over_http(settings):
 
         assert client.post(f"/api/jobs/{job_id}/retry").status_code == 409  # not failed
         assert detail["job"]["can_message"] is True
-        assert client.post(f"/api/jobs/{job_id}/messages", json={"message": "  "}).status_code == 409
-        queued = client.post(f"/api/jobs/{job_id}/messages", json={"message": "สรุปให้สั้นลง"}).json()
+        assert client.post(f"/api/jobs/{job_id}/messages", data={"message": "  "}).status_code == 409
+        queued = client.post(f"/api/jobs/{job_id}/messages", data={"message": "สรุปให้สั้นลง"}).json()
         assert queued["status"] == "queued"
         assert client.post(f"/api/jobs/{job_id}/revise", json={"feedback": "อีกข้อ"}).status_code == 409  # already queued
         asyncio.run(app.state.runner.run_job(job_id))

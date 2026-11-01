@@ -37,12 +37,15 @@ def today_text(now: datetime | None = None) -> str:
 
 
 def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[str],
-                 context: list[str], feedback: str | None = None, resumed: bool = False) -> str:
+                 context: list[str], feedback: str | None = None, resumed: bool = False,
+                 new_files: list[str] | None = None) -> str:
     outputs = [f"- {o}" for o in job_type.outputs]
+    attached = ["", "ไฟล์ที่แนบมากับข้อความนี้ (อยู่ใน input/):", *[f"- input/{f}" for f in new_files]] if new_files else []
     if feedback and resumed:
         return "\n".join([
             "ข้อความใหม่จากผู้ใช้:",
             feedback.strip(),
+            *attached,
             "",
             "ถ้าเป็นคำถาม ให้ตอบได้เลย ถ้าเป็นคำขอให้แก้หรือทำเพิ่ม ให้ทำในโฟลเดอร์ output/",
             "โดยไฟล์ผลลัพธ์หลักต้องยังอยู่ครบ:",

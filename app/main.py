@@ -5,7 +5,10 @@ import asyncio
 import base64
 import logging
 import secrets
+import shutil
 from collections import Counter
+from datetime import datetime
+from urllib.parse import quote
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,15 +21,19 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .claude_status import check_claude
 from .config import Settings
 from .convert import READABLE_EXTS, prepare_inputs
+from .export_docx import action_items_markdown, markdown_to_docx
 from .jobtypes import JOB_TYPES
-from .review import approve
+from .notify import Notifier
+from .review import approve, slugify
 from .runner import MESSAGE_STATUSES, Runner
 from .state import RuntimeState
-from .store import AREAS, JobStore, now_iso
+from .store import AREAS, JOB_ID_RE, JobStore, now_iso, read_json
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher
 
+APP_VERSION = "0.2.0"
 STATIC_DIR = Path(__file__).parent / "static"
+DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 CLAUDE_CHECK_EVERY = 600  # seconds
@@ -75,7 +82,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     store = JobStore(settings)
     tasks = TaskStore(settings.tasks_file)
     state = RuntimeState(settings.state_dir / "runtime.json")
-    runner = Runner(store, tasks, state, settings)
+    notifier = Notifier(settings)
+    runner = Runner(store, tasks, state, settings, notifier=notifier)
     inbox = InboxWatcher(store, settings)
     scheduler = FollowupScheduler(store, tasks, state, settings)
 
@@ -106,7 +114,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
 
     app = FastAPI(title="AI Work Assistant", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.store, app.state.runner = settings, store, runner
-    app.state.tasks, app.state.inbox, app.state.scheduler = tasks, inbox, scheduler
+    app.state.tasks, app.state.inbox, app.state.scheduler, app.state.notifier = tasks, inbox, scheduler, notifier
     if settings.dashboard_password:
         app.add_middleware(BasicAuth, user=settings.dashboard_user, password=settings.dashboard_password)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -188,7 +196,9 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
                 raise HTTPException(400, f"กรุณากรอก: {field.label}")
         if job_type.id == "meeting-summary" and not any(Path(n).suffix.lower() in READABLE_EXTS for n, _ in uploads):
             raise HTTPException(400, "ต้องมีไฟล์ข้อความอย่างน้อย 1 ไฟล์ (.txt .vtt .srt .docx .pdf) — ไฟล์เสียงต้องถอดความก่อน")
-        default_title = Path(uploads[0][0]).stem if uploads else job_type.label
+        first_line = values["instructions"].split("\n")[0].strip()[:90]
+        stem = Path(uploads[0][0]).stem if uploads else ""
+        default_title = ((stem or first_line) if job_type.id == "meeting-summary" else (first_line or stem)) or job_type.label
         params = {"customer": values["customer"]} if values["customer"] else {}
         # Create the job and write its files without awaiting in between, so the worker never sees it half-made.
         job = store.create(job_type.id, values["title"] or default_title, values["instructions"], params)
@@ -232,10 +242,81 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         return job_view(approve(store, tasks, settings, job_id, body.note))
 
     @app.post("/api/jobs/{job_id}/messages")
-    async def message_job(job_id: str, body: MessageIn):
+    async def message_job(job_id: str, message: str = Form(""), files: list[UploadFile] = File(default=[])):
+        """A follow-up in the same job: text, files, or both. Claude resumes its earlier session."""
+        runner.check_can_message(job_id)
+        uploads = [(f.filename, await f.read()) for f in files if f.filename]
+        if not message.strip() and not uploads:
+            raise ValueError("พิมพ์ข้อความหรือแนบไฟล์ก่อนส่ง")
+        names = [store.add_file(job_id, "input", name, data) for name, data in uploads]
+        if names:
+            warnings = prepare_inputs(store.area_dir(job_id, "input"))
+            if warnings:
+                job = store.get(job_id)
+                store.update(job_id, warnings=sorted(set(job.get("warnings") or []) | set(warnings)))
+        return job_view(runner.send_message(job_id, message, files=names))
+
+    @app.post("/api/jobs/{job_id}/revise")
+    async def revise_job(job_id: str, body: MessageIn):  # JSON form, kept for scripts written against v0.1
         return job_view(runner.send_message(job_id, body.message or body.feedback))
 
-    app.add_api_route("/api/jobs/{job_id}/revise", message_job, methods=["POST"])
+    @app.get("/api/jobs/{job_id}/export/{rel:path}")
+    async def export_docx(job_id: str, rel: str):
+        """Download an output as a Word document styled like a PEC report."""
+        job = store.get(job_id)
+        path = store.file_path(job_id, "output", rel)
+        if job is None or not path.is_file():
+            raise KeyError(rel)
+        if path.suffix.lower() in (".md", ".txt"):
+            md = path.read_text("utf-8", errors="replace")
+        elif path.name.endswith("action_items.json"):
+            md = action_items_markdown(read_json(path, default=[]), job["title"])
+        else:
+            raise ValueError("ส่งออกเป็น Word ได้เฉพาะไฟล์ .md .txt และ action_items.json")
+        modified = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+        data = await asyncio.to_thread(markdown_to_docx, md, title=job["title"], file_name=rel,
+                                       rev=max(1, len(job.get("runs") or [])), modified=modified,
+                                       template=settings.report_template)
+        filename = f"{slugify(job['title'])}_{Path(rel).stem}.docx"
+        return Response(data, media_type=DOCX_TYPE, headers={
+            "Content-Disposition": f"attachment; filename=\"export.docx\"; filename*=UTF-8''{quote(filename)}"})
+
+    # -- system & notifications ---------------------------------------------------
+    @app.post("/api/notify/test")
+    async def notify_test():
+        if not notifier.channels:
+            raise ValueError("ยังไม่ได้ตั้งค่าช่องทางแจ้งเตือนในไฟล์ .env")
+        return await notifier.send("ทดสอบการแจ้งเตือนจาก AI Work Assistant: ตั้งค่าถูกต้องแล้ว", {"event": "test"})
+
+    @app.get("/api/system")
+    async def system():
+        def count_files(root: Path, cap: int = 5000) -> int:
+            n = 0
+            for p in root.rglob("*") if root.is_dir() else []:
+                if p.is_file() and not p.name.startswith((".", "@")):
+                    n += 1
+                    if n >= cap:
+                        break
+            return n
+        disk = shutil.disk_usage(settings.data_dir) if settings.data_dir.exists() else None
+        jobs_dir = settings.jobs_dir
+        return {
+            "version": {"app": APP_VERSION, "claude": (state.get("claude") or {}).get("version")},
+            "claude": state.get("claude"),
+            "quota": state.get("quota"),
+            "worker": {"active": list(runner.active), "max": settings.max_concurrent_jobs,
+                       "timeout_min": settings.job_timeout_min, "model": settings.claude_model,
+                       "effort": settings.claude_effort, "allow_python": settings.allow_python},
+            "followup": {"time": settings.followup_time, "days": list(settings.followup_days)},
+            "notify": {"channels": notifier.channels, "on": list(settings.notify_on),
+                       "dashboard_url": settings.dashboard_url},
+            "storage": {"data_dir": str(settings.data_dir), "knowledge_dir": str(settings.knowledge_dir),
+                        "knowledge_files": await asyncio.to_thread(count_files, settings.knowledge_dir),
+                        "jobs": sum(1 for p in jobs_dir.iterdir() if JOB_ID_RE.match(p.name)) if jobs_dir.exists() else 0,
+                        "free_gb": round(disk.free / 1e9, 1) if disk else None,
+                        "total_gb": round(disk.total / 1e9, 1) if disk else None,
+                        "report_template": settings.report_template.is_file()},
+        }
 
     @app.post("/api/jobs/{job_id}/retry")
     async def retry_job(job_id: str):

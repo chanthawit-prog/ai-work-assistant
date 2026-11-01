@@ -39,6 +39,17 @@ class Settings:
     allow_python: bool = True
     dashboard_user: str = "admin"
     dashboard_password: str = ""
+    dashboard_url: str = ""                 # used for links in notifications, e.g. http://nas.local:8080
+    notify_synology_url: str = ""
+    notify_line_token: str = ""
+    notify_line_to: str = ""
+    notify_line_api: str = "https://api.line.me/v2/bot/message/push"
+    notify_webhook_url: str = ""
+    notify_on: tuple[str, ...] = ("needs_review", "failed")
+
+    @property
+    def report_template(self) -> Path:
+        return self.knowledge_dir / "templates" / "report-template.docx"
 
     # Folders inside DATA_DIR -------------------------------------------------
     @property
@@ -98,4 +109,11 @@ class Settings:
             allow_python=_bool("ALLOW_PYTHON", True),
             dashboard_user=os.environ.get("DASHBOARD_USER", "admin").strip() or "admin",
             dashboard_password=os.environ.get("DASHBOARD_PASSWORD", ""),
+            dashboard_url=os.environ.get("DASHBOARD_URL", "").strip(),
+            notify_synology_url=os.environ.get("NOTIFY_SYNOLOGY_CHAT_URL", "").strip(),
+            notify_line_token=os.environ.get("NOTIFY_LINE_TOKEN", "").strip(),
+            notify_line_to=os.environ.get("NOTIFY_LINE_TO", "").strip(),
+            notify_line_api=os.environ.get("NOTIFY_LINE_API", "").strip() or "https://api.line.me/v2/bot/message/push",
+            notify_webhook_url=os.environ.get("NOTIFY_WEBHOOK_URL", "").strip(),
+            notify_on=tuple(x.strip() for x in os.environ.get("NOTIFY_ON", "needs_review,failed").split(",") if x.strip()),
         )
