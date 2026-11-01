@@ -11,8 +11,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MALLOC_ARENA_MAX=2 \
     TZ=Asia/Bangkok
 
+# poppler-utils: pdftotext, so PDFs in the knowledge folder can be searched (runs only while indexing)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv tini ca-certificates tzdata ripgrep \
+ && apt-get install -y --no-install-recommends python3 python3-venv tini ca-certificates tzdata ripgrep poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code, installed unmodified from Anthropic's npm package (current versions install the native

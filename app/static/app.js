@@ -65,6 +65,7 @@ function fmtDuration(start, end) {
 }
 const fmtMB = (mb) => (mb == null ? "—" : mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
 const memWaitText = (w) => `รอ RAM ของ NAS ว่าง (เหลือ ${fmtMB(w.available_mb)} ต้องการ ${fmtMB(w.need_mb)})`;
+const waitText = (w) => (w.reason === "login" ? "รอเชื่อม Claude subscription (ยังไม่ได้ล็อกอิน)" : memWaitText(w));
 /* the server refuses oversized uploads too (MAX_UPLOAD_MB); checking here saves sending them first */
 function tooBig(list) {
   const limit = lastStatus && lastStatus.limits && lastStatus.limits.max_upload_mb;
@@ -439,7 +440,7 @@ function jobRow(j) {
   let extra = "";
   if (j.status === "running" && j.last_step) extra = `<span class="job-live">${esc(j.last_step)}</span>`;
   else if (j.status === "queued" && j.not_before) extra = `<span class="job-live">รอโควต้าถึง ${esc(fmtTime(j.not_before))}</span>`;
-  else if (j.status === "queued" && j.wait) extra = `<span class="job-live">${esc(memWaitText(j.wait))}</span>`;
+  else if (j.status === "queued" && j.wait) extra = `<span class="job-live">${esc(waitText(j.wait))}</span>`;
   else if ((j.status === "failed" || j.status === "cancelled") && j.error) extra = `<span class="job-error">${esc(j.error)}</span>`;
   const took = j.started_at ? ` · ${fmtDuration(j.started_at, j.status === "running" ? null : j.ended_at)}` : "";
   return `<li><a class="job" href="#/job/${encodeURIComponent(j.id)}">
@@ -693,6 +694,8 @@ function renderLive(job, partial, steps) {
   } else if (job.status === "queued") {
     live.innerHTML = job.not_before
       ? `<p class="working wait">${icon("clock")}โควต้าเต็ม จะเริ่มเองเวลา ${esc(fmtTime(job.not_before))}</p>`
+      : job.wait && job.wait.reason === "login"
+        ? `<p class="working wait">${icon("clock")}รอเชื่อม Claude subscription ก่อน ดูวิธีเชื่อมที่<a href="#/">หน้าแรก</a> งานจะเริ่มเองเมื่อเชื่อมได้</p>`
       : job.wait
         ? `<p class="working wait">${icon("clock")}${esc(memWaitText(job.wait))} จะเริ่มเองไม่เกิน ${esc(fmtClock(job.wait.start_by))}</p>`
         : `<p class="working wait">${icon("clock")}รอคิว Claude จะเริ่มเมื่อถึงคิว</p>`;
@@ -1184,10 +1187,80 @@ function memorySection(m) {
     </dl></section>`;
 }
 
+/* knowledge search: the same index Claude searches with `python3 -m kb_search` */
+const KB_KIND = { pdf: "PDF", docx: "Word", text: "ข้อความ" };
+const KB_SOURCE = { knowledge: "คลังความรู้", library: "ผลงานที่อนุมัติแล้ว" };
+function knowledgeSection() {
+  return `<section class="sys-section" id="kbSection"><h2>คลังความรู้</h2>
+    <div id="kbStatus"><p class="small muted">กำลังโหลด…</p></div>
+    <form class="kb-search" id="kbForm" role="search">
+      <label class="search">${icon("search")}<span class="sr-only">ค้นในคลังความรู้</span>
+        <input type="search" id="kbQuery" placeholder="ค้นใน PDF, Word และไฟล์ข้อความ เช่น แรงดันตก" autocomplete="off"></label>
+      <button type="submit" class="btn">ค้น</button>
+    </form>
+    <div id="kbResults" aria-live="polite"></div>
+    <button type="button" class="btn" id="kbRefresh">${icon("retry")}อัปเดตดัชนีตอนนี้</button></section>`;
+}
+function highlight(text, terms) {
+  let out = esc(text);
+  for (const t of [...terms].sort((a, b) => b.length - a.length)) {
+    const safe = esc(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (safe) out = out.replace(new RegExp(safe, "gi"), (m) => `<mark>${m}</mark>`);
+  }
+  return out;
+}
+async function loadKnowledge() {
+  const el = $("#kbStatus");
+  if (!el) return;
+  const k = await api("/api/knowledge");
+  const row = (a, b) => `<div><dt>${esc(a)}</dt><dd>${b}</dd></div>`;
+  const kinds = Object.entries(k.by_kind || {}).map(([x, n]) => `${KB_KIND[x] || x} ${n}`).join(" · ");
+  const roots = Object.entries(k.by_root || {}).map(([x, n]) => `${KB_SOURCE[x] || x} ${n}`).join(" · ");
+  const notes = k.notes || [];
+  el.innerHTML = `
+    ${k.enabled ? "" : `<p class="notice warn">${icon("alert")}<span>ปิดการค้นอยู่ (KB_SEARCH=false ในไฟล์ .env)</span></p>`}
+    ${k.pdftotext ? "" : `<p class="notice warn">${icon("alert")}<span>ไม่พบโปรแกรม pdftotext จึงค้นในไฟล์ PDF ไม่ได้ สั่ง Build image ใหม่เพื่อติดตั้ง</span></p>`}
+    <dl class="facts">
+      ${row("ไฟล์ที่ค้นได้", k.files ? `${k.files} ไฟล์ · ${esc(kinds)}<br><span class="small muted">${esc(roots)}</span>` : `<span class="muted">ยังไม่มี วางเอกสารไว้ใน knowledge/ แล้วระบบจะทำดัชนีให้เองเมื่อว่าง</span>`)}
+      ${row("อัปเดตล่าสุด", `${esc(fmtTime(k.updated_at) || "ยังไม่เคย")}${k.running ? " · กำลังอัปเดต…" : ""} <span class="small muted">(ตรวจไฟล์ใหม่ทุก ${k.refresh_min} นาที เมื่อไม่มีงานที่กำลังทำ)</span>`)}
+    </dl>
+    ${notes.length ? `<details class="kb-notes"><summary>ไฟล์ที่อ่านไม่ได้หรือได้ไม่ครบ ${notes.length} ไฟล์</summary>
+      <ul>${notes.map((n) => `<li><code>${esc(n.path)}</code> ${esc(n.note)}</li>`).join("")}</ul></details>` : ""}`;
+}
+function wireKnowledge() {
+  const form = $("#kbForm");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = $("#kbQuery").value.trim();
+    const out = $("#kbResults");
+    if (!q) return $("#kbQuery").focus();
+    out.innerHTML = `<p class="small muted">กำลังค้น…</p>`;
+    try {
+      const r = await api(`/api/knowledge/search?q=${encodeURIComponent(q)}`);
+      out.innerHTML = r.results.length ? `<ol class="kb-results">${r.results.map((x) => `
+        <li><a href="/api/knowledge/file/${x.path.split("/").map(encodeURIComponent).join("/")}" target="_blank" rel="noopener">${esc(x.rel)}</a>
+          <span class="small muted">· ${esc(x.loc_label)} · ${esc(KB_SOURCE[x.source] || x.source)}</span>
+          <p class="kb-excerpt">${highlight(x.excerpt, r.terms)}</p></li>`).join("")}</ol>`
+        : `<p class="small muted">ไม่พบ “${esc(q)}” ลองคำที่สั้นลง หรือคำภาษาอังกฤษที่เอกสารน่าจะใช้</p>`;
+    } catch (err) {
+      out.innerHTML = `<p class="small muted">${esc(err.message)}</p>`;
+    }
+  });
+  $("#kbRefresh").addEventListener("click", async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      const r = await postJSON("/api/knowledge/refresh");
+      toast(r.busy ? "จะอัปเดตดัชนีเมื่อไม่มีงานที่กำลังทำและ RAM ว่างพอ" : "เริ่มอัปเดตดัชนีแล้ว");
+    } catch (err) { toast(err.message, "bad"); }
+    setTimeout(() => loadKnowledge().catch(() => {}), 1500);
+  });
+}
+
 async function showSystem() {
   $("#view").innerHTML = `<section class="system" aria-labelledby="sysTitle">
       <div class="page-head"><div><h1 id="sysTitle">ระบบ</h1>
-        <p class="lede">สถานะการเชื่อมต่อ Claude การใช้งาน subscription การแจ้งเตือน หน่วยความจำ และที่เก็บข้อมูลบน NAS</p></div></div>
+        <p class="lede">สถานะการเชื่อมต่อ Claude การใช้งาน subscription การแจ้งเตือน หน่วยความจำ ค้นคลังความรู้ และที่เก็บข้อมูลบน NAS</p></div></div>
       <div id="sysBody" aria-busy="true">${skeletonRows(3)}</div></section>`;
   const s = await api("/api/system");
   const c = s.claude || {};
@@ -1231,6 +1304,8 @@ async function showSystem() {
 
     ${memorySection(s.memory)}
 
+    ${knowledgeSection()}
+
     <section class="sys-section"><h2>ที่เก็บข้อมูล</h2><dl class="facts">
       ${row("โฟลเดอร์งาน", `<code>${esc(s.storage.data_dir)}</code> · ${s.storage.jobs} งาน`)}
       ${row("คลังความรู้", `<code>${esc(s.storage.knowledge_dir)}</code> · ${s.storage.knowledge_files} ไฟล์`)}
@@ -1247,6 +1322,8 @@ async function showSystem() {
     } catch (err) { toast(err.message, "bad"); }
     route();
   });
+  wireKnowledge();
+  loadKnowledge().catch((err) => { const el = $("#kbStatus"); if (el) el.innerHTML = `<p class="small muted">${esc(err.message)}</p>`; });
   const notifyBtn = $("#sysNotify");
   if (notifyBtn) notifyBtn.addEventListener("click", async () => {
     notifyBtn.disabled = true;

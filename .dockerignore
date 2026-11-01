@@ -1,10 +1,14 @@
+# Only app/, scripts/, tools/ and requirements.txt go into the image; keep the rest out of the build context.
+# With the default paths in docker-compose.yml, data/ and claude-home/ (your Claude login) live in this folder.
 .git
 .env
-data
-knowledge
-claude-home
-tests
-docs
+data/
+knowledge/
+claude-home/
+docs/
+examples/
+tests/
 **/__pycache__
-.pytest_cache
-.venv
+**/*.pyc
+.pytest_cache/
+.venv/

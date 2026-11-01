@@ -427,7 +427,7 @@ td.num { white-space: nowrap; }
 .list-tools { max-width: 820px; margin: 0 auto var(--s5); }
 .search { position: relative; display: block; }
 .search .icon { position: absolute; top: 50%; left: var(--s3); color: var(--ink-3); transform: translateY(-50%); }
-.search input { width: 100%; min-height: 44px; padding: var(--s2) var(--s3) var(--s2) 40px; border: 1px solid var(--control); border-radius: var(--r-md); background: var(--surface); color: var(--ink); font: inherit; }
+.search input { display: block; width: 100%; min-height: 44px; padding: var(--s2) var(--s3) var(--s2) 40px; border: 1px solid var(--control); border-radius: var(--r-md); background: var(--surface); color: var(--ink); font: inherit; }
 .search input:focus-visible { outline-offset: 0; border-color: var(--focus); }
 .reply { flex-direction: column; align-items: stretch; }
 .reply .attachments { padding: var(--s1) var(--s1) 0; }
@@ -493,6 +493,19 @@ td.num { white-space: nowrap; }
   .activity summary::after { transition: none; }
 }
 @keyframes fade { from { opacity: 0; } }
+
+/* ============================================================== knowledge search (System page) */
+.kb-search { display: flex; align-items: center; gap: var(--s2); margin: var(--s4) 0 var(--s2); }
+.kb-search .search { flex: 1; min-width: 0; }
+.kb-search .btn { min-height: 44px; margin-top: 0; }
+.kb-results { margin: 0 0 var(--s2); padding: 0; list-style: none; }
+.kb-results li { padding: var(--s3) 0; border-bottom: 1px solid var(--line); }
+.kb-results a { font-weight: 500; overflow-wrap: anywhere; }
+.kb-excerpt { margin-top: var(--s1); color: var(--ink-2); font-size: var(--fs-small); overflow-wrap: anywhere; }
+.kb-notes { margin-top: var(--s3); color: var(--ink-2); font-size: var(--fs-small); }
+.kb-notes summary { cursor: pointer; }
+.kb-notes ul { margin: var(--s2) 0 0; padding-left: 1.2em; }
+mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color: var(--ink); }
 
 /* ============================================================== recurring jobs (งานประจำ) */
 .schedules { max-width: 820px; margin: 0 auto; }

@@ -55,6 +55,7 @@ def write_json(path: Path, data: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.chmod(tmp, 0o644)  # mkstemp makes owner-only files; File Station and SMB users must be able to read them
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

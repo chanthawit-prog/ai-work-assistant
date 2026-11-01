@@ -51,12 +51,33 @@ RECENT_EXTS = {".md", ".txt", ".json", ".csv"}
 MAX_QUOTA_WAITS = 3
 MAX_STDERR_LINES = 40
 BASE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"  # pec_calc, for jobs that may run python3
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"  # pec_calc and kb_search, run by Claude with python3
+KB_RULE = "Bash(python3 -m kb_search *)"
+
+
+def kb_prompt(python: bool) -> str:
+    """Told to Claude when the knowledge index holds files."""
+    lines = [
+        "", "## ค้นคลังความรู้ (kb_search)",
+        "ค้นข้อความในไฟล์ PDF, Word, Markdown และ CSV ของคลังความรู้ รวมทั้งผลงานที่ผู้ใช้อนุมัติแล้ว ด้วยคำสั่ง",
+        '`python3 -m kb_search "คำค้น"` (หลายคำ = ต้องมีครบทุกคำ · `--full` ดูข้อความเต็ม · `--in knowledge/engineering` จำกัดโฟลเดอร์)',
+        "- ผลลัพธ์บอกไฟล์ หน้า (PDF) หรือบรรทัด และข้อความรอบคำที่พบ ค้นก่อนเปิด PDF ทั้งไฟล์ แล้วอ่านเฉพาะหน้าที่เกี่ยวข้องด้วย Read",
+        "- ถ้าไม่พบ ลองคำที่สั้นลง คำพ้อง หรือคำภาษาอังกฤษที่เอกสารน่าจะใช้",
+        "- อ้างอิงชื่อไฟล์และหน้าของข้อมูลที่นำมาใช้",
+    ]
+    if not python:
+        lines.append("- ในงานนี้ Bash ใช้ได้เฉพาะคำสั่ง python3 -m kb_search เท่านั้น")
+    return "\n".join(lines) + "\n"
 MESSAGE_STATUSES = (NEEDS_REVIEW, DONE, FAILED, CANCELLED)  # states in which you can talk to Claude again
 MEM_FIRST_SAMPLE_SEC = 0.5  # skip the instant between exec and the runtime loading
 MEM_SAMPLE_SEC = 1
 MEM_HISTORY = 20
 OOM_TEXT = re.compile(r"out of memory|cannot allocate memory|allocation failed|ENOMEM", re.IGNORECASE)
+AUTH_TEXT = re.compile(r"not logged in|please run /login|authentication_failed|invalid api key|"
+                       r"oauth token (?:has )?expired|token has expired", re.IGNORECASE)
+LOGIN_MESSAGE = ("Claude ยังไม่ได้ล็อกอิน หรือการล็อกอินหมดอายุ: บน NAS รัน "
+                 "sudo docker exec -it ai-work-assistant claude auth login (ดู docs/setup-ds925.md ข้อ 5) "
+                 "แล้วกด 'ลองใหม่' งานอื่นในคิวจะรอและเริ่มเองเมื่อเชื่อมได้")
 OOM_MESSAGES = {
     "container": "หน่วยความจำไม่พอ: Claude ใช้ RAM ครบเพดานของ container (MEM_LIMIT) จึงถูกหยุดกลางคัน "
                  "กด 'ลองใหม่' หรือเพิ่ม MEM_LIMIT ในไฟล์ .env",
@@ -99,14 +120,24 @@ class Runner:
         self.oom_hint: set[str] = set()     # jobs whose CLI printed "out of memory"
         self.mem_wait: dict | None = None   # the job at the head of the queue waiting for free RAM
         self.forced_start: dict[str, str] = {}
+        self.login_wait = False             # queued jobs are held because Claude Code is not signed in
+        self.kb = None                      # KnowledgeIndex, set by the app
 
     # -- building a run ------------------------------------------------------
-    def build_command(self, job_type: JobType, resume_session: str | None = None) -> list[str]:
+    def kb_ready(self) -> bool:
+        return self.kb is not None and self.kb.ready()
+
+    def build_command(self, job_type: JobType, resume_session: str | None = None, kb: bool | None = None) -> list[str]:
+        kb = self.kb_ready() if kb is None else kb
+        python = job_type.allow_python and self.settings.allow_python
         tools, allowed = list(BASE_TOOLS), list(BASE_TOOLS)
-        if job_type.allow_python and self.settings.allow_python:
+        if python:
             tools.append("Bash")
             # Claude often writes `cd <job folder> && python3 ...`; each part of a chain must match a rule
             allowed += ["Bash(python3 *)", "Bash(cd *)"]
+        elif kb:
+            tools.append("Bash")
+            allowed.append(KB_RULE)  # every job may search the knowledge index, and run nothing else
         cmd = [
             self.settings.claude_bin, "-p",
             "--output-format", "stream-json", "--verbose", "--include-partial-messages",
@@ -115,7 +146,7 @@ class Runner:
             "--tools", ",".join(tools),
             "--allowedTools", ",".join(allowed),
             "--strict-mcp-config",  # no MCP servers: none are needed, and each one is another process in RAM
-            "--append-system-prompt", system_prompt(job_type, self.settings),
+            "--append-system-prompt", system_prompt(job_type, self.settings) + (kb_prompt(python) if kb else ""),
         ]
         if self.settings.knowledge_dir.is_dir():
             cmd += ["--add-dir", str(self.settings.knowledge_dir)]
@@ -205,7 +236,8 @@ class Runner:
         context = self.prepare_context(job, job_type)
         prompt = task_message(job, job_type, self.settings, inputs, context, feedback=feedback, resumed=bool(resume),
                               new_files=new_files)
-        cmd = self.build_command(job_type, resume_session=resume)
+        kb = self.kb_ready()
+        cmd = self.build_command(job_type, resume_session=resume, kb=kb)
 
         run = {"n": run_no, "kind": kind, "feedback": feedback, "files": new_files, "started_at": now_iso(),
                "ended_at": None, "exit_code": None, "model": None, "result": None, "usage": {}}
@@ -224,11 +256,14 @@ class Runner:
         meta = RunMeta()
         oom_before = (sysmon.container_memory() or {}).get("oom_kills")
         env = claude_env(self.settings.claude_low_memory)
-        if job_type.allow_python and self.settings.allow_python:
-            # `python3 -m pec_calc ...` (and `import pec_calc`) work from the job folder; the toolkit finds the
-            # company tables and the team's sign-off in the knowledge folder
+        python = job_type.allow_python and self.settings.allow_python
+        if python or kb:
+            # `python3 -m pec_calc ...` / `python3 -m kb_search ...` (and `import pec_calc`) work from the job folder
             env["PYTHONPATH"] = os.pathsep.join(p for p in (str(TOOLS_DIR), env.get("PYTHONPATH", "")) if p)
-            env["PEC_CALC_KNOWLEDGE"] = str(self.settings.knowledge_dir)
+        if python:
+            env["PEC_CALC_KNOWLEDGE"] = str(self.settings.knowledge_dir)  # company tables and the team's sign-off
+        if kb:
+            env["KB_INDEX"] = str(self.kb.path)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=str(job_dir), env=env, stdin=PIPE, stdout=PIPE, stderr=PIPE, limit=STREAM_LIMIT)
@@ -276,15 +311,17 @@ class Runner:
                 self.peak_mem[job_id] = max(self.peak_mem.get(job_id, 0), mb)
             await asyncio.sleep(MEM_SAMPLE_SEC)
 
-    def _oom_reason(self, job_id: str, exit_code: int | None, oom_before: int | None) -> str | None:
+    def _oom_reason(self, job_id: str, exit_code: int | None, oom_before: int | None) -> tuple[str, int | None] | None:
+        """Why the run died for lack of memory, if it did, with the container's cap (MB) for the message."""
         hinted = job_id in self.oom_hint
         self.oom_hint.discard(job_id)
-        after = (sysmon.container_memory() or {}).get("oom_kills")
+        reading = sysmon.container_memory() or {}
+        after, limit = reading.get("oom_kills"), reading.get("limit_mb")
         if oom_before is not None and after is not None and after > oom_before:
-            return "container"  # the kernel's OOM killer acted inside this container (MEM_LIMIT reached)
+            return "container", limit  # the kernel's OOM killer acted inside this container (MEM_LIMIT reached)
         if exit_code in (-9, 137) and job_id not in self.cancel_reasons:
-            return "killed"  # SIGKILL that we did not send: usually the NAS ran out of memory
-        return "runtime" if hinted else None
+            return "killed", limit  # SIGKILL that we did not send: usually the NAS ran out of memory
+        return ("runtime", limit) if hinted else None
 
     async def _read_stdout(self, job_id: str, run_no: int, proc, meta: RunMeta, job_dir: str) -> None:
         while True:
@@ -347,7 +384,7 @@ class Runner:
                 self._step(job_id, run_no, "stderr", line[:300])
 
     def _finish(self, job_id: str, run_no: int, exit_code: int | None, meta: RunMeta, error: str | None = None,
-                oom: str | None = None) -> None:
+                oom: tuple[str, int | None] | None = None) -> None:
         job = self.store.get(job_id)
         job_type = JOB_TYPES[job["type"]]
         job_dir = self.store.job_dir(job_id)
@@ -375,9 +412,14 @@ class Runner:
             else:
                 status, message = FAILED, "โควต้า subscription เต็มหลายรอบติดกัน"
         elif oom and not meta.succeeded:
-            status, message = FAILED, OOM_MESSAGES[oom] + (f" (ใช้ไปสูงสุด {peak} MB)" if peak else "")
+            # a sudden spike is killed between two samples, so quote the container's cap, not the sampled peak
+            reason, limit = oom
+            status, message = FAILED, OOM_MESSAGES[reason] + (f" (เพดาน {limit} MB)" if reason == "container" and limit else "")
         elif not meta.succeeded or (exit_code or 0) != 0:
             message = meta.error_text() or (f"claude จบการทำงานด้วยรหัส {exit_code}" if exit_code else "")
+            if AUTH_TEXT.search(message):
+                message = LOGIN_MESSAGE
+                self._mark_logged_out()
             status, message = FAILED, message or "Claude ทำงานไม่สำเร็จ (ดูรายละเอียดใน events.jsonl)"
         else:
             missing = [o for o in job_type.outputs if not (job_dir / o).is_file()]
@@ -517,6 +559,19 @@ class Runner:
             except Exception:
                 log.exception("could not mark job %s as failed", job_id)
 
+    def login_ok(self) -> bool:
+        """The dashboard's setup panel promises that jobs wait in the queue until Claude is connected: hold
+        them while the last check found Claude Code installed but not signed in."""
+        status = self.state.get("claude") or {}
+        return not (status.get("installed") and status.get("logged_in") is False)
+
+    def _mark_logged_out(self) -> None:
+        """A run just failed for lack of a login: hold the rest of the queue right away."""
+        status = dict(self.state.get("claude") or {})
+        status.update(installed=True, logged_in=False, checked_at=now_iso(),
+                      error="Claude Code ตอบว่ายังไม่ได้ล็อกอิน หรือการล็อกอินหมดอายุ")
+        self.state.set("claude", status)
+
     def memory_gate(self, job_id: str) -> bool:
         """True when this job may start now. While the NAS is short of RAM it keeps its place at the head
         of the queue; after MEM_WAIT_MAX_MIN it starts anyway, with a warning in its timeline."""
@@ -540,6 +595,8 @@ class Runner:
         return True
 
     def wait_info(self, job_id: str) -> dict | None:
+        if self.login_wait:
+            return {"reason": "login"}
         wait = self.mem_wait
         if not wait or wait["job_id"] != job_id:
             return None
@@ -549,6 +606,10 @@ class Runner:
         """One scheduling pass: start queued jobs while there is a free slot and enough RAM."""
         free = self.settings.max_concurrent_jobs - len(self.active)
         ready = self.store.runnable(datetime.now().astimezone()) if free > 0 else []
+        self.login_wait = bool(ready) and not self.login_ok()
+        if self.login_wait:
+            self.mem_wait = None
+            return
         if self.mem_wait and self.mem_wait["job_id"] not in {j["id"] for j in ready}:
             self.mem_wait = None  # cancelled, or a slot is busy again
         for job in ready:

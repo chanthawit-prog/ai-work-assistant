@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import mimetypes
 import secrets
 import shutil
+import time
 from collections import Counter
 from datetime import datetime
 from urllib.parse import quote
@@ -24,6 +26,7 @@ from .config import Settings
 from .convert import READABLE_EXTS, prepare_inputs
 from .export_docx import action_items_markdown, markdown_to_docx
 from .jobtypes import JOB_TYPES
+from .knowledge import KnowledgeIndex, kb_search
 from .notify import Notifier
 from .review import approve, slugify
 from .runner import MESSAGE_STATUSES, Runner
@@ -42,8 +45,16 @@ MAX_TEXT_BYTES = 2 * 1024 * 1024
 MB = 1024 * 1024
 UPLOAD_CHUNK = MB
 # Each check starts the CLI twice (about 140 MB for a moment), so check every 30 minutes and never while a
-# job is running: a running job proves the login works anyway.
+# job is running: a running job proves the login works anyway. While jobs wait for a login, check every
+# minute, so they start by themselves soon after `claude auth login`.
 CLAUDE_CHECK_EVERY = 1800  # seconds
+LOGIN_RECHECK = 60
+
+# reachable without the dashboard password: the healthcheck, and what a phone fetches (without credentials)
+# to add the dashboard to its home screen. None of these files holds any data.
+PUBLIC_PATHS = frozenset({"/healthz", "/static/manifest.webmanifest", "/static/favicon.svg", "/static/icon-192.png",
+                          "/static/icon-512.png", "/static/icon-maskable-512.png", "/static/apple-touch-icon.png"})
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("assistant")
@@ -120,7 +131,7 @@ class BasicAuth(BaseHTTPMiddleware):
         self.password = password.encode()
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/healthz":
+        if request.url.path in PUBLIC_PATHS:
             return await call_next(request)
         header = request.headers.get("authorization", "")
         if header.startswith("Basic "):
@@ -140,6 +151,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     state = RuntimeState(settings.state_dir / "runtime.json")
     notifier = Notifier(settings)
     runner = Runner(store, tasks, state, settings, notifier=notifier)
+    knowledge = KnowledgeIndex(settings, runner)
+    runner.kb = knowledge
     inbox = InboxWatcher(store, settings)
     scheduler = FollowupScheduler(store, tasks, state, settings)
     schedules = ScheduleStore(settings.data_dir / "config" / "schedules.json")
@@ -151,15 +164,16 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         return status
 
     async def claude_check_loop() -> None:
-        first = True
+        last = None
         while True:
             try:
-                if first or not runner.active:  # always once at startup, then only while idle
-                    await refresh_claude()
+                every = LOGIN_RECHECK if runner.login_wait else CLAUDE_CHECK_EVERY
+                if last is None or (not runner.active and time.monotonic() - last >= every):
+                    await refresh_claude()  # always once at startup, then only while idle
+                    last = time.monotonic()
             except Exception:
                 log.exception("claude status check failed")
-            first = False
-            await asyncio.sleep(CLAUDE_CHECK_EVERY)
+            await asyncio.sleep(15)
 
     max_upload = settings.max_upload_mb * MB
     too_large = f"ไฟล์ใหญ่เกินไป ส่งได้รวมไม่เกิน {settings.max_upload_mb} MB ต่อครั้ง (ตั้งได้ที่ MAX_UPLOAD_MB)"
@@ -188,7 +202,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         background = []
         if start_background:
             background = [asyncio.create_task(c) for c in
-                          (runner.loop(), inbox.loop(), scheduler.loop(), recurring.loop(), claude_check_loop())]
+                          (runner.loop(), inbox.loop(), scheduler.loop(), recurring.loop(), claude_check_loop(),
+                           knowledge.loop())]
             log.info("data=%s knowledge=%s claude=%s", settings.data_dir, settings.knowledge_dir, settings.claude_bin)
         yield
         for task in background:
@@ -197,7 +212,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     app = FastAPI(title="AI Work Assistant", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.store, app.state.runner = settings, store, runner
     app.state.tasks, app.state.inbox, app.state.scheduler, app.state.notifier = tasks, inbox, scheduler, notifier
-    app.state.schedules, app.state.recurring = schedules, recurring
+    app.state.schedules, app.state.recurring, app.state.knowledge = schedules, recurring, knowledge
     if settings.dashboard_password:
         app.add_middleware(BasicAuth, user=settings.dashboard_user, password=settings.dashboard_password)
     app.add_middleware(UploadLimit, max_bytes=max_upload, message=too_large)
@@ -479,6 +494,43 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         job = create_scheduled_job(store, item, datetime.now().astimezone())
         schedules.mark_manual(schedule_id, job["id"])
         return job_view(job)
+
+    # -- knowledge search -----------------------------------------------------------
+    @app.get("/api/knowledge")
+    async def knowledge_status():
+        info = await asyncio.to_thread(knowledge.status)
+        return {**info, "enabled": settings.kb_enabled, "running": knowledge.running, "last": knowledge.last,
+                "pdftotext": shutil.which("pdftotext") is not None, "refresh_min": settings.kb_refresh_min}
+
+    @app.get("/api/knowledge/search")
+    async def knowledge_search(q: str = "", limit: int = 10, within: str = ""):
+        try:
+            found = await asyncio.to_thread(kb_search.search, knowledge.path, q, max(1, min(limit, 30)), within)
+        except kb_search.SearchError as exc:
+            raise HTTPException(400, str(exc)) from None
+        keep = ("path", "source", "rel", "kind", "loc", "loc_label", "excerpt", "text")
+        return {"query": found["query"], "terms": found["terms"],
+                "results": [{k: r[k] for k in keep} for r in found["results"]]}
+
+    @app.post("/api/knowledge/refresh")
+    async def knowledge_refresh():
+        if not settings.kb_enabled:
+            raise ValueError("ปิดการค้นคลังความรู้อยู่ (KB_SEARCH=false ในไฟล์ .env)")
+        knowledge.request()
+        return {"queued": True, "busy": knowledge.busy(), "running": knowledge.running}
+
+    @app.get("/api/knowledge/file/{rel:path}")
+    async def knowledge_file(rel: str):
+        """Open a search result: knowledge/<path> or library/<path>, read-only, never outside those folders."""
+        root_name, _, sub = rel.partition("/")
+        root = knowledge.roots.get(root_name)
+        if root is None or not sub:
+            raise KeyError(rel)
+        base = root.resolve()
+        path = (base / sub).resolve()
+        if base not in path.parents or not path.is_file():
+            raise KeyError(rel)
+        return FileResponse(path, filename=path.name)
 
     # -- follow-up list --------------------------------------------------------
     @app.get("/api/tasks")

@@ -52,6 +52,8 @@ class Settings:
     claude_low_memory: bool = True          # BUN_OPTIONS=--smol, MALLOC_ARENA_MAX=2, no non-essential traffic
     max_upload_mb: int = 200                # per request; uploads are streamed to disk, never held in RAM
     docx_embed_fonts: bool = True           # embed Anuphan in Word exports
+    kb_enabled: bool = True                 # full-text index of knowledge/ (PDF, Word, text) and approved outputs
+    kb_refresh_min: int = 30                # how often to look for new or changed files (only while idle)
 
     @property
     def report_template(self) -> Path:
@@ -127,4 +129,6 @@ class Settings:
             claude_low_memory=_bool("CLAUDE_LOW_MEMORY", True),
             max_upload_mb=_int("MAX_UPLOAD_MB", 200),
             docx_embed_fonts=_bool("DOCX_EMBED_FONTS", True),
+            kb_enabled=_bool("KB_SEARCH", True),
+            kb_refresh_min=_int("KB_REFRESH_MIN", 30),
         )
