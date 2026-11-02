@@ -18,7 +18,7 @@ import secrets
 import shutil
 import tempfile
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,7 @@ CANCELLED = "cancelled"
 STATUSES = (QUEUED, RUNNING, NEEDS_REVIEW, DONE, FAILED, CANCELLED)
 
 AREAS = ("input", "context", "output")
+TRASH_DAYS = 30  # a deleted job waits this long in DATA_DIR/trash/jobs/ before it is removed for good
 JOB_ID_RE = re.compile(r"^\d{8}-\d{6}-[a-z]+(?:-[a-z]+)*-[0-9a-f]{4}$")
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -185,6 +186,47 @@ class JobStore:
             job.update(changes)
             self.save(job)
             return job
+
+    @property
+    def trash_dir(self) -> Path:
+        return self.settings.data_dir / "trash" / "jobs"
+
+    def trash(self, job_id: str, refuse: tuple[str, ...] = (QUEUED, RUNNING)) -> Path:
+        """Move a job's folder to DATA_DIR/trash/jobs/, where File Station can move it back for TRASH_DAYS days.
+        Refused while the job is queued or running (checked under the lock, so a message cannot slip in)."""
+        with self._lock:
+            job = self.get(job_id)
+            source = self.job_dir(job_id)
+            if job is None or not source.is_dir():
+                raise KeyError(job_id)
+            if job.get("status") in refuse:
+                raise ValueError("งานนี้อยู่ในคิวหรือกำลังทำ ยกเลิกงานก่อน แล้วค่อยลบ")
+            self.trash_dir.mkdir(parents=True, exist_ok=True)
+            target, n = self.trash_dir / job_id, 2
+            while target.exists():
+                target, n = self.trash_dir / f"{job_id} ({n})", n + 1
+            (source / ".deleted_at").write_text(now_iso(), encoding="utf-8")
+            os.replace(source, target)  # both under DATA_DIR: a rename, nothing is copied
+            self._cache.pop(str(source / "job.json"), None)
+            return target
+
+    def purge_trash(self, days: int = TRASH_DAYS, now: datetime | None = None) -> list[str]:
+        """Remove deleted jobs older than `days`. Returns the folder names removed."""
+        if not self.trash_dir.is_dir():
+            return []
+        cutoff = (now or datetime.now().astimezone()) - timedelta(days=days)
+        removed = []
+        for folder in sorted(self.trash_dir.iterdir()):
+            if not folder.is_dir():
+                continue
+            try:
+                when = datetime.fromisoformat((folder / ".deleted_at").read_text("utf-8").strip())
+            except (OSError, ValueError):  # moved there by hand: go by the folder's own time
+                when = datetime.fromtimestamp(folder.stat().st_mtime).astimezone()
+            if when < cutoff:
+                shutil.rmtree(folder, ignore_errors=True)
+                removed.append(folder.name)
+        return removed
 
     def list(self, limit: int = 300) -> list[dict]:
         jobs_dir = self.settings.jobs_dir

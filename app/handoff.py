@@ -24,7 +24,8 @@ def default_files(store: JobStore, job: dict) -> list[str]:
 
 
 def handoff(store: JobStore, job_id: str, type_id: str, instructions: str = "", title: str = "",
-            customer: str | None = None, files: list[str] | None = None, inputs: list[str] | None = None) -> dict:
+            customer: str | None = None, files: list[str] | None = None, inputs: list[str] | None = None,
+            effort: str = "") -> dict:
     """Create the follow-on job with the chosen output files and, if asked, files attached to the original job
     (a nameplate photo, the transcript). Call it without awaiting in between (as the job form does) so the worker
     never picks the new job up before its files are in."""
@@ -62,6 +63,8 @@ def handoff(store: JobStore, job_id: str, type_id: str, instructions: str = "", 
     subject = params.get("subject") or source["title"]
     title = (title.strip() or f"{job_type.label} · {subject}")[:150]
     new_params = {"customer": values["customer"]} if values["customer"] else {}
+    if effort:
+        new_params["effort"] = effort
     new_params.update(subject=subject, from_job=job_id, from_title=source["title"], from_type=source["type"],
                       from_approved=source["status"] == DONE)
 

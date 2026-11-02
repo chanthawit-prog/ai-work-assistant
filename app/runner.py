@@ -53,6 +53,10 @@ MAX_STDERR_LINES = 40
 BASE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"  # pec_calc and kb_search, run by Claude with python3
 KB_RULE = "Bash(python3 -m kb_search *)"
+# the app's own files in the job folder: Claude neither sees them (Glob leaves denied files out) nor spends tokens
+# reading them, and cannot overwrite them
+INTERNAL_FILES = ("job.json", "events.jsonl", "steps.jsonl")
+DENY_RULES = [f"{tool}(./{name})" for tool in ("Read", "Edit") for name in INTERNAL_FILES]
 
 
 def kb_prompt(python: bool) -> str:
@@ -128,8 +132,14 @@ class Runner:
     def kb_ready(self) -> bool:
         return self.kb is not None and self.kb.ready()
 
-    def build_command(self, job_type: JobType, resume_session: str | None = None, kb: bool | None = None) -> list[str]:
+    def effort_for(self, job: dict, job_type: JobType) -> str:
+        """The job's own choice (เร็ว ปกติ ละเอียด), else CLAUDE_EFFORT, else the job type's default ("" = Claude Code's)."""
+        return (job.get("params") or {}).get("effort") or self.settings.claude_effort or job_type.effort
+
+    def build_command(self, job_type: JobType, resume_session: str | None = None, kb: bool | None = None,
+                      effort: str | None = None) -> list[str]:
         kb = self.kb_ready() if kb is None else kb
+        effort = (self.settings.claude_effort or job_type.effort) if effort is None else effort
         python = job_type.allow_python and self.settings.allow_python
         tools, allowed = list(BASE_TOOLS), list(BASE_TOOLS)
         if python:
@@ -146,6 +156,7 @@ class Runner:
             "--permission-prompts", "none",
             "--tools", ",".join(tools),
             "--allowedTools", ",".join(allowed),
+            "--disallowedTools", ",".join(DENY_RULES),
             "--strict-mcp-config",  # no MCP servers: none are needed, and each one is another process in RAM
             "--append-system-prompt", system_prompt(job_type, self.settings) + (kb_prompt(python) if kb else ""),
         ]
@@ -153,8 +164,8 @@ class Runner:
             cmd += ["--add-dir", str(self.settings.knowledge_dir)]
         if self.settings.claude_model:
             cmd += ["--model", self.settings.claude_model]
-        if self.settings.claude_effort:
-            cmd += ["--effort", self.settings.claude_effort]
+        if effort:
+            cmd += ["--effort", effort]
         if resume_session:
             cmd += ["--resume", resume_session]
         return cmd + list(self.settings.claude_extra_args)
@@ -239,10 +250,12 @@ class Runner:
         prompt = task_message(job, job_type, self.settings, inputs, context, feedback=feedback, resumed=bool(resume),
                               new_files=new_files, edited=edited)
         kb = self.kb_ready()
-        cmd = self.build_command(job_type, resume_session=resume, kb=kb)
+        effort = self.effort_for(job, job_type)
+        cmd = self.build_command(job_type, resume_session=resume, kb=kb, effort=effort)
 
         run = {"n": run_no, "kind": kind, "feedback": feedback, "files": new_files, "edited": edited,
-               "started_at": now_iso(), "ended_at": None, "exit_code": None, "model": None, "result": None, "usage": {}}
+               "effort": effort or "default", "started_at": now_iso(), "ended_at": None, "exit_code": None,
+               "model": None, "result": None, "usage": {}}
         self.store.update(job_id, status=RUNNING, runs=job["runs"] + [run], pending_feedback=None, pending_files=[],
                           pending_edits=[], error=None, not_before=None,
                           warnings=sorted(set(job.get("warnings", [])) | set(warnings)))

@@ -45,6 +45,15 @@ const HANDOFF_PRESETS = {
   ],
 };
 const PRIORITY = { high: "สูง", medium: "กลาง", low: "ต่ำ" };
+/* how hard Claude thinks (claude --effort): lighter is faster and uses less of the subscription */
+const EFFORT_LABEL = { low: "เร็ว", medium: "ปกติ", high: "ละเอียด", max: "ละเอียดที่สุด" };
+const effortName = (e) => EFFORT_LABEL[e] || "Claude เลือกเอง";
+function effortOptions(typeDefault, selected = "") {
+  return [["auto", `อัตโนมัติ · ${effortName(typeDefault)}`], ["low", "เร็ว"], ["medium", "ปกติ"], ["high", "ละเอียด"],
+    ["max", "ละเอียดที่สุด"]]
+    .map(([v, label]) => `<option value="${v}" ${v === (selected || "auto") ? "selected" : ""}>${esc(label)}</option>`).join("");
+}
+const EFFORT_HELP = "เร็ว / ปกติ: งานเขียนอย่างร่างอีเมล เสร็จในไม่ถึงนาที · ละเอียด: งานคำนวณและใบเสนอราคา · ละเอียดที่สุด: โจทย์ยากจริง ๆ ใช้เวลาและโควต้ามากที่สุด";
 const DAYS = { mon: "จ.", tue: "อ.", wed: "พ.", thu: "พฤ.", fri: "ศ.", sat: "ส.", sun: "อา." };
 const QUOTA_WINDOWS = { five_hour: "รอบ 5 ชม.", seven_day: "รายสัปดาห์", seven_day_opus: "รายสัปดาห์ (Opus)", seven_day_sonnet: "รายสัปดาห์ (Sonnet)" };
 const PLACEHOLDERS = {
@@ -461,6 +470,7 @@ async function showHome() {
         <div class="composer-bar">
           <button type="button" class="btn quiet" id="cAttach">${icon("paperclip")}แนบไฟล์</button>
           <input type="file" id="cFileInput" multiple hidden>
+          <label class="effort-pick" title="${esc(EFFORT_HELP)}"><span>Claude คิด</span><select id="cEffort"></select></label>
           <span class="hint" id="cHint"></span>
           <button type="submit" class="btn primary" id="cSend">ส่งให้ Claude${icon("arrow-up")}</button>
         </div>
@@ -492,6 +502,7 @@ async function showHome() {
     message.placeholder = PLACEHOLDERS[t.id] || "";
     $("#typeDesc").textContent = t.description;
     $("#customerField").hidden = !t.fields.some((f) => f.name === "customer");
+    $("#cEffort").innerHTML = effortOptions(t.effort, $("#cEffort").value);
     const needsFiles = t.fields.some((f) => f.kind === "files" && f.required);
     $("#cHint").textContent = needsFiles ? "งานนี้ต้องแนบไฟล์ transcript" : `${SEND_KEY} เพื่อส่ง`;
   };
@@ -554,6 +565,7 @@ async function showHome() {
     fd.append("title", title);
     fd.append("instructions", text);
     fd.append("customer", customer);
+    fd.append("effort", $("#cEffort").value);
     files.forEach((f) => fd.append("files", f, f.name));
     const send = $("#cSend");
     send.disabled = true;
@@ -657,7 +669,8 @@ function showJob(id) {
             <button type="submit" class="btn primary" id="replySend" aria-label="ส่งข้อความ">${icon("arrow-up")}</button>
           </div>
         </form>
-        <p class="reply-hint" id="replyHint"></p>
+        <div class="reply-meta"><p class="reply-hint" id="replyHint"></p>
+          <label class="effort-pick" title="${esc(EFFORT_HELP)}"><span>Claude คิด</span><select id="replyEffort"></select></label></div>
       </section>
       <section class="output" aria-labelledby="outTitle">
         <div class="output-head"><h2 id="outTitle">ผลลัพธ์</h2><div class="tabs" id="outTabs" role="tablist"></div>
@@ -677,6 +690,7 @@ function showJob(id) {
   let outputs = [];
   let job = null;
   let rendered = false;
+  let effortSig = null;
 
   const reply = $("#reply");
   const replyText = $("#replyText");
@@ -710,6 +724,7 @@ function showJob(id) {
     if (tooBig(replyFiles)) return;
     const fd = new FormData();
     fd.append("message", text);
+    fd.append("effort", $("#replyEffort").value);
     replyFiles.forEach((f) => fd.append("files", f, f.name));
     const send = $("#replySend");
     send.disabled = true;
@@ -770,6 +785,11 @@ function showJob(id) {
     const data = await api(`/api/jobs/${encodeURIComponent(id)}?after=${after}`);
     job = data.job;
     jobPage.handoff = data.handoff;
+    const levels = `${(data.type && data.type.effort) || ""}|${(job.params && job.params.effort) || ""}`;
+    if (levels !== effortSig) { // the job's level, until you pick another one for the next message
+      effortSig = levels;
+      $("#replyEffort").innerHTML = effortOptions(data.type && data.type.effort, job.params && job.params.effort);
+    }
     const running = job.status === "running" || job.status === "queued";
 
     const sig = `${job.status}|${job.updated_at}`;
@@ -896,6 +916,7 @@ function renderReplyState(job) {
   text.disabled = !job.can_message;
   send.disabled = !job.can_message;
   $("#replyAttach").disabled = !job.can_message;
+  $("#replyEffort").disabled = !job.can_message;
   $("#replyHint").textContent = hint;
 }
 
@@ -919,6 +940,7 @@ function renderJobHead(job) {
     job.params && job.params.customer ? `ลูกค้า ${job.params.customer}` : "",
     runs.length > 1 ? `${runs.length} รอบ` : "",
     last.model || "",
+    last.effort ? `คิดแบบ${effortName(last.effort === "default" ? "" : last.effort)}` : "",
     usage.num_turns ? `${usage.num_turns} turns` : "",
     last.started_at && last.ended_at ? `ใช้เวลา ${fmtDuration(last.started_at, last.ended_at)}` : "",
   ].filter(Boolean).map(esc).join('<span class="sep">·</span>');
@@ -933,6 +955,7 @@ function renderJobHead(job) {
   if (job.status === "needs_review") actions.push(`<button type="button" class="btn primary" data-act="approve">${icon("check")}อนุมัติผลงาน</button>`);
   if (job.status === "failed" || job.status === "cancelled") actions.push(`<button type="button" class="btn" data-act="retry">${icon("retry")}ลองใหม่ตั้งแต่ต้น</button>`);
   if (job.status === "queued" || job.status === "running") actions.push(`<button type="button" class="btn danger" data-act="ask-cancel">${icon("x")}ยกเลิกงาน</button>`);
+  else actions.push(`<button type="button" class="btn quiet danger-text" data-act="ask-delete">${icon("trash")}ลบงาน</button>`);
 
   $("#jobHead").innerHTML = `
     <div class="job-head-main">
@@ -955,6 +978,15 @@ function renderJobHead(job) {
       $("#jobHead [data-act=keep]").focus();
       return;
     }
+    if (act === "ask-delete") {
+      btn.closest(".actions").innerHTML = `<span class="confirm-text">ย้ายงานนี้ไปถังขยะ? กู้คืนได้ภายใน 30 วันจากโฟลเดอร์ trash/jobs บน NAS${
+        job.status === "done" ? " ผลงานที่อนุมัติแล้วยังอยู่ใน library" : ""}</span>
+        <button type="button" class="btn danger" data-act="delete">${icon("trash")}ยืนยันลบงาน</button>
+        <button type="button" class="btn quiet" data-act="keep">ไม่ลบ</button>`;
+      $$("#jobHead [data-act]").forEach((b) => b.addEventListener("click", onAction));
+      $("#jobHead [data-act=keep]").focus();
+      return;
+    }
     if (act === "keep") return renderJobHead(job);
     if (act === "approve" && unsaved()) return toast("บันทึกหรือยกเลิกที่แก้ไว้ก่อน แล้วค่อยอนุมัติ", "bad");
     if (act === "handoff") return openHandoff(job, btn);
@@ -969,6 +1001,12 @@ function renderJobHead(job) {
       } else if (act === "retry") {
         await postJSON(`${base}/retry`);
         toast("ใส่กลับเข้าคิวแล้ว");
+      } else if (act === "delete") {
+        const res = await api(base, { method: "DELETE" });
+        editing = null; // the job and anything open in it are gone
+        toast(`ย้ายไปถังขยะแล้ว กู้คืนได้ภายใน ${res.days} วัน`);
+        location.hash = "#/";
+        return;
       }
       route();
     } catch (err) {
@@ -1009,6 +1047,8 @@ async function openHandoff(job, btn) {
         <input id="hCustomer" type="text" autocomplete="off" placeholder="ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/"></div>
       <div class="field"><label for="hInstr">สิ่งที่ให้ Claude ทำ</label>
         <textarea id="hInstr" rows="3" placeholder="เช่น ร่างอีเมลส่งใบเสนอราคานี้ถึงลูกค้า"></textarea></div>
+      <div class="field"><label for="hEffort">Claude คิด</label>
+        <select id="hEffort" class="effort-select" title="${esc(EFFORT_HELP)}"></select></div>
       <div class="field"><span class="label">ไฟล์ผลลัพธ์ที่ส่งต่อ</span>
         ${files.map((f) => `<label class="check-option"><input type="checkbox" name="hFile" value="${esc(f)}" ${info.files.includes(f) ? "checked" : ""}> ${esc(f)}</label>`).join("")}</div>
       ${jobPage.inputs.length ? `<div class="field"><span class="label">ไฟล์ที่แนบในงานเดิม (ถ้าอยากให้ Claude ดูต้นฉบับด้วย เช่น รูป nameplate หรือ transcript)</span>
@@ -1027,6 +1067,7 @@ async function openHandoff(job, btn) {
   const syncType = () => {
     const t = types.find((x) => x.id === form.elements.hType.value);
     $("#hCustomerField").hidden = !(t && t.fields.some((f) => f.name === "customer"));
+    $("#hEffort").innerHTML = effortOptions(t && t.effort, $("#hEffort").value);
   };
   const choose = (p) => {
     chosen = p;
@@ -1072,7 +1113,7 @@ async function openHandoff(job, btn) {
     try {
       const created = await postJSON(`/api/jobs/${encodeURIComponent(job.id)}/handoff`, {
         type: type.id, title: `${step} · ${subject}`, instructions, customer: $("#hCustomer").value.trim(),
-        files: picked, inputs: originals });
+        files: picked, inputs: originals, effort: $("#hEffort").value });
       toast("สร้างงานต่อแล้ว Claude จะเริ่มเมื่อถึงคิว");
       location.hash = `#/job/${encodeURIComponent(created.id)}`;
     } catch (err) {

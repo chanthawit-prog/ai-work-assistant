@@ -27,7 +27,7 @@ from .config import Settings
 from .convert import READABLE_EXTS, prepare_inputs
 from .export_docx import action_items_markdown, markdown_to_docx
 from .handoff import HANDOFF_TYPES, default_files, handoff
-from .jobtypes import JOB_TYPES
+from .jobtypes import EFFORTS, JOB_TYPES
 from .knowledge import KnowledgeIndex, kb_search
 from .notify import Notifier
 from .review import EDITABLE_EXTS, approve, file_sha, save_edit, slugify
@@ -35,11 +35,11 @@ from .runner import MESSAGE_STATUSES, Runner
 from .schedules import INCLUDES, ScheduleStore, next_run, schedulable_types
 from .schedules import create_job as create_scheduled_job
 from .state import RuntimeState
-from .store import AREAS, JOB_ID_RE, JobStore, now_iso, read_json, revision
+from .store import AREAS, JOB_ID_RE, TRASH_DAYS, JobStore, now_iso, read_json, revision
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
@@ -90,6 +90,7 @@ class HandoffIn(BaseModel):
     instructions: str = ""
     title: str = ""
     customer: str | None = None  # None: the customer of the job you continue from
+    effort: str = ""             # low | medium | high | max; empty or "auto": the new job type's default
     files: list[str] = []        # output files to pass on; empty: the job type's main outputs
     inputs: list[str] = []       # files attached to the original job to pass on as well (a photo, the transcript)
 
@@ -108,6 +109,17 @@ class ScheduleIn(BaseModel):
     time: str = ""
     include: list[str] = []
     enabled: bool = True
+
+
+def clean_effort(value: str | None) -> str:
+    """เร็ว ปกติ ละเอียด ละเอียดที่สุด = low medium high max; "auto" (or empty) = the job type's default. Forms send
+    "auto", because FastAPI reads an empty form field as one that was not sent."""
+    value = (value or "").strip().lower()
+    if value == "auto":
+        return ""
+    if value and value not in EFFORTS:
+        raise HTTPException(400, "ระดับการคิดต้องเป็น low, medium, high หรือ max")
+    return value
 
 
 class UploadTooLarge(Exception):
@@ -189,6 +201,17 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         state.set("claude", status)
         return status
 
+    async def trash_loop() -> None:
+        """Empty the trash of jobs deleted more than TRASH_DAYS days ago: at start, then every 6 hours."""
+        while True:
+            try:
+                removed = await asyncio.to_thread(store.purge_trash)
+                if removed:
+                    log.info("trash: removed %d jobs deleted over %d days ago", len(removed), TRASH_DAYS)
+            except Exception:
+                log.exception("trash purge failed")
+            await asyncio.sleep(6 * 3600)
+
     async def claude_check_loop() -> None:
         last = None
         while True:
@@ -229,7 +252,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         if start_background:
             background = [asyncio.create_task(c) for c in
                           (runner.loop(), inbox.loop(), scheduler.loop(), recurring.loop(), claude_check_loop(),
-                           knowledge.loop())]
+                           knowledge.loop(), trash_loop())]
             log.info("data=%s knowledge=%s claude=%s", settings.data_dir, settings.knowledge_dir, settings.claude_bin)
         yield
         for task in background:
@@ -333,7 +356,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
 
     @app.post("/api/jobs")
     async def create_job(type: str = Form(...), title: str = Form(""), instructions: str = Form(""),
-                         customer: str = Form(""), files: list[UploadFile] = File(default=[])):
+                         customer: str = Form(""), effort: str = Form(""), files: list[UploadFile] = File(default=[])):
         job_type = JOB_TYPES.get(type)
         if job_type is None:
             raise HTTPException(400, "ไม่รู้จักชนิดงานนี้")
@@ -349,6 +372,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         stem = Path(names[0]).stem if names else ""
         default_title = ((stem or first_line) if job_type.id == "meeting-summary" else (first_line or stem)) or job_type.label
         params = {"customer": values["customer"]} if values["customer"] else {}
+        if clean_effort(effort):
+            params["effort"] = clean_effort(effort)
         staging, staged = await receive_uploads(uploads)
         try:
             # Create the job and move its files in without awaiting in between, so the worker never sees it half-made.
@@ -406,7 +431,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     @app.post("/api/jobs/{job_id}/handoff")
     async def handoff_job(job_id: str, body: HandoffIn):
         """Start the next job from this result (no await inside: the worker must not see the new job half-made)."""
-        job = handoff(store, job_id, body.type, body.instructions, body.title, body.customer, body.files, body.inputs)
+        job = handoff(store, job_id, body.type, body.instructions, body.title, body.customer, body.files, body.inputs,
+                      clean_effort(body.effort))
         return job_view(job)
 
     @app.post("/api/jobs/{job_id}/approve")
@@ -415,9 +441,12 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         return job_view(await asyncio.to_thread(approve, store, tasks, settings, job_id, body.note))
 
     @app.post("/api/jobs/{job_id}/messages")
-    async def message_job(job_id: str, message: str = Form(""), files: list[UploadFile] = File(default=[])):
-        """A follow-up in the same job: text, files, or both. Claude resumes its earlier session."""
-        runner.check_can_message(job_id)
+    async def message_job(job_id: str, message: str = Form(""), effort: str | None = Form(None),
+                          files: list[UploadFile] = File(default=[])):
+        """A follow-up in the same job: text, files, or both. Claude resumes its earlier session. `effort`, when
+        sent, becomes the job's thinking level from this run on ("auto": back to the job type's default)."""
+        job = runner.check_can_message(job_id)
+        level = None if effort is None else clean_effort(effort)
         uploads = [f for f in files if f.filename]
         if not message.strip() and not uploads:
             raise ValueError("พิมพ์ข้อความหรือแนบไฟล์ก่อนส่ง")
@@ -433,6 +462,9 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             if warnings:
                 job = store.get(job_id)
                 store.update(job_id, warnings=sorted(set(job.get("warnings") or []) | set(warnings)))
+        if level is not None:
+            params = {k: v for k, v in (store.get(job_id).get("params") or {}).items() if k != "effort"}
+            store.update(job_id, params={**params, **({"effort": level} if level else {})})
         return job_view(runner.send_message(job_id, message, files=names))
 
     @app.post("/api/jobs/{job_id}/revise")
@@ -503,6 +535,14 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
                        "runs": state.get("mem_runs") or [],
                        "waiting": runner.wait_info(runner.mem_wait["job_id"]) if runner.mem_wait else None},
         }
+
+    @app.delete("/api/jobs/{job_id}")
+    async def delete_job(job_id: str):
+        """Move the job to the trash (DATA_DIR/trash/jobs/). Approved results stay in the library."""
+        if job_id in runner.active:
+            raise ValueError("งานนี้กำลังทำ ยกเลิกงานก่อน แล้วค่อยลบ")
+        target = store.trash(job_id)
+        return {"ok": True, "trash": target.relative_to(settings.data_dir).as_posix(), "days": TRASH_DAYS}
 
     @app.post("/api/jobs/{job_id}/retry")
     async def retry_job(job_id: str):

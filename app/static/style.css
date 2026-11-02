@@ -271,7 +271,7 @@ label, .label { font-size: var(--fs-small); font-weight: 500; }
 .attachments:empty { display: none; }
 .attachments li { display: inline-flex; align-items: center; gap: var(--s2); max-width: 100%; padding: 2px 2px 2px var(--s3); border-radius: var(--r-sm); background: var(--sunken); font-size: var(--fs-small); }
 .attachments li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-bar { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3) var(--s3); }
+.composer-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); padding: var(--s2) var(--s3) var(--s3); }
 .composer-bar .hint { display: none; flex: 1; color: var(--ink-3); font-size: var(--fs-meta); text-align: right; }
 .composer-bar .btn.primary { margin-left: auto; }
 
@@ -392,6 +392,12 @@ label, .label { font-size: var(--fs-small); font-weight: 500; }
 .reply textarea:disabled { cursor: not-allowed; }
 .reply .btn { width: 44px; min-height: 44px; padding: 0; }
 .reply-hint { margin-top: var(--s2); color: var(--ink-3); font-size: var(--fs-meta); }
+.reply-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s1) var(--s3); }
+.reply-meta .reply-hint { flex: 1 1 240px; }
+.effort-pick { display: inline-flex; align-items: center; gap: var(--s2); color: var(--ink-2); font-size: var(--fs-small); font-weight: 400; white-space: nowrap; }
+.effort-pick select { min-height: 32px; padding: 0 var(--s2); font-size: var(--fs-small); }
+.reply-meta .effort-pick { margin-top: var(--s2); }
+.effort-select { justify-self: start; min-width: 220px; }
 
 /* output sheet + title block (the signature move) */
 .output-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); margin-bottom: var(--s3); }
@@ -630,4 +636,5 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
   .tabs button, .icon-btn { min-height: 44px; min-width: 44px; }
   .files li { min-height: 44px; }
   .kbd-hint { display: none; } /* no keyboard shortcuts on a phone */
+  .effort-pick select { min-height: 44px; }
 }
