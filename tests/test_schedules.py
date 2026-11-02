@@ -68,7 +68,10 @@ def test_store_validates_and_keeps_only_known_fields(tmp_path):
     store = ScheduleStore(tmp_path / "schedules.json")
     s = store.create({**WEEKLY, "days": ["Friday"], "time": "7:05", "include": ["tasks", "everything"], "customer": "x"})
     assert s["id"] == "S-0001" and s["days"] == ["fri"] and s["time"] == "07:05"
-    assert s["include"] == ["tasks"] and s["customer"] == ""  # general jobs have no customer field
+    assert s["include"] == ["tasks"] and s["customer"] == "x"  # general jobs may name a customer
+    follow = store.create({**WEEKLY, "type": "follow-up", "customer": "x"})
+    assert follow["customer"] == ""  # the follow-up job has no customer field
+    store.delete(follow["id"])
     for bad in ({"name": ""}, {"days": []}, {"time": "25:00"}, {"type": "meeting-summary"},
                 {"type": "sales-brief", "customer": ""}, {"type": "general", "instructions": ""}):
         with pytest.raises(ValueError):

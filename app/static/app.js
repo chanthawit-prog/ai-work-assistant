@@ -66,6 +66,17 @@ const PLACEHOLDERS = {
 };
 
 let viewToken = 0; // bumps on every navigation so polling loops of the old view stop
+/* known customer names, offered in every customer box so the same customer is always typed the same way */
+let customerNamesAt = 0;
+async function loadCustomerNames(force = false) {
+  if (!force && Date.now() - customerNamesAt < 60000) return;
+  customerNamesAt = Date.now();
+  try {
+    const list = await api("/api/customers");
+    $("#customerNames").innerHTML = list.map((c) => `<option value="${esc(c.name)}"></option>`).join("");
+  } catch (err) { /* autocomplete is a convenience */ }
+}
+const customerUrl = (name) => `#/customer/${encodeURIComponent(name)}`;
 let lastStatus = null;
 let jobTypesCache = null;
 
@@ -462,8 +473,8 @@ async function showHome() {
         </fieldset>
         <p class="type-desc" id="typeDesc"></p>
         <div class="customer" id="customerField" hidden>
-          <label for="cCustomer">ชื่อลูกค้า</label>
-          <input id="cCustomer" type="text" autocomplete="off" placeholder="เช่น ACME (ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/)" oninput="this.removeAttribute('aria-invalid')">
+          <label for="cCustomer" id="cCustomerLabel">ชื่อลูกค้า</label>
+          <input id="cCustomer" type="text" autocomplete="off" list="customerNames" placeholder="เช่น ACME (ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/)" oninput="this.removeAttribute('aria-invalid')">
         </div>
         <textarea id="cMessage" rows="3" aria-labelledby="composeTitle"></textarea>
         <ul class="attachments" id="cFiles"></ul>
@@ -501,13 +512,21 @@ async function showHome() {
     const t = currentType();
     message.placeholder = PLACEHOLDERS[t.id] || "";
     $("#typeDesc").textContent = t.description;
-    $("#customerField").hidden = !t.fields.some((f) => f.name === "customer");
+    const customerField = t.fields.find((f) => f.name === "customer");
+    $("#customerField").hidden = !customerField;
+    if (customerField) $("#cCustomerLabel").textContent = customerField.required ? "ชื่อลูกค้า" : "ลูกค้า (ไม่บังคับ)";
     $("#cEffort").innerHTML = effortOptions(t.effort, $("#cEffort").value);
     const needsFiles = t.fields.some((f) => f.kind === "files" && f.required);
     $("#cHint").textContent = needsFiles ? "งานนี้ต้องแนบไฟล์ transcript" : `${SEND_KEY} เพื่อส่ง`;
   };
   form.addEventListener("change", (e) => { if (e.target.name === "type") syncType(); });
+  /* from a customer page: #/?type=proposal-draft&customer=ACME */
+  const ask = new URLSearchParams(location.hash.split("?")[1] || "");
+  if (types.some((t) => t.id === ask.get("type"))) $$("input[name=type]", form).forEach((r) => (r.checked = r.value === ask.get("type")));
+  if (ask.get("customer")) $("#cCustomer").value = ask.get("customer");
   syncType();
+  if (ask.get("type") || ask.get("customer")) message.focus();
+  loadCustomerNames();
 
   $("#cAttach").onclick = () => $("#cFileInput").click();
   $("#cFileInput").onchange = (e) => {
@@ -937,13 +956,13 @@ function renderJobHead(job) {
     job.type_label,
     `สร้าง ${fmtTime(job.created_at)}`,
     job.source !== "dashboard" && !job.origin ? SOURCES[job.source] || job.source : "", // a hand-off links its origin below
-    job.params && job.params.customer ? `ลูกค้า ${job.params.customer}` : "",
+    job.params && job.params.customer ? { html: `ลูกค้า <a href="${customerUrl(job.params.customer)}">${esc(job.params.customer)}</a>` } : "",
     runs.length > 1 ? `${runs.length} รอบ` : "",
     last.model || "",
     last.effort ? `คิดแบบ${effortName(last.effort === "default" ? "" : last.effort)}` : "",
     usage.num_turns ? `${usage.num_turns} turns` : "",
     last.started_at && last.ended_at ? `ใช้เวลา ${fmtDuration(last.started_at, last.ended_at)}` : "",
-  ].filter(Boolean).map(esc).join('<span class="sep">·</span>');
+  ].filter(Boolean).map((m) => (m.html ? m.html : esc(m))).join('<span class="sep">·</span>');
 
   const jobLink = (j) => (j.status ? `<a href="#/job/${encodeURIComponent(j.id)}">${esc(j.title)}</a> ${badge(j.status)}` : `${esc(j.title)} <span class="muted">(ลบแล้ว)</span>`);
   const links = [];
@@ -1031,6 +1050,7 @@ async function openHandoff(job, btn) {
   const info = jobPage.handoff;
   if (!info) return toast("ส่งต่อได้เมื่องานนี้มีผลลัพธ์แล้ว", "bad");
   const types = (await getJobTypes()).filter((t) => info.types.includes(t.id));
+  loadCustomerNames();
   const presets = HANDOFF_PRESETS[job.type] || HANDOFF_PRESETS.general;
   const files = jobPage.outputs.map((f) => f.path);
   btn.setAttribute("aria-expanded", "true");
@@ -1044,7 +1064,7 @@ async function openHandoff(job, btn) {
         <div class="chips" role="radiogroup" aria-labelledby="hTypeLabel">${types.map((t) => `
           <label class="type-option"><input type="radio" name="hType" value="${esc(t.id)}"><span>${icon(TYPE_ICON[t.id] || "message")}${esc(t.label)}</span></label>`).join("")}</div></div>
       <div class="field" id="hCustomerField" hidden><label for="hCustomer">ชื่อลูกค้า</label>
-        <input id="hCustomer" type="text" autocomplete="off" placeholder="ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/"></div>
+        <input id="hCustomer" type="text" autocomplete="off" list="customerNames" placeholder="ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/"></div>
       <div class="field"><label for="hInstr">สิ่งที่ให้ Claude ทำ</label>
         <textarea id="hInstr" rows="3" placeholder="เช่น ร่างอีเมลส่งใบเสนอราคานี้ถึงลูกค้า"></textarea></div>
       <div class="field"><label for="hEffort">Claude คิด</label>
@@ -1325,9 +1345,9 @@ function renderTasks(items) {
     const d = daysLeft(i);
     const cls = done || d === null ? "" : d < 0 ? "overdue" : d <= 3 ? "soon" : "";
     const hint = done || d === null ? "" : d < 0 ? `เลยมา ${-d} วัน` : d === 0 ? "วันนี้" : `อีก ${d} วัน`;
-    const source = i.source_job
+    const source = (i.source_job
       ? `<a href="#/job/${encodeURIComponent(i.source_job)}">${esc(i.source_title || i.source_job)}</a>`
-      : `<span class="muted">เพิ่มเอง</span>`;
+      : `<span class="muted">เพิ่มเอง</span>`) + (i.customer ? `<div>ลูกค้า <a href="${customerUrl(i.customer)}">${esc(i.customer)}</a></div>` : "");
     return `<tr class="${done ? "done" : ""}">
       <td class="check"><input type="checkbox" data-id="${esc(i.id)}" ${done ? "checked" : ""} aria-label="ทำเครื่องหมายว่า ${esc(i.task)} เสร็จแล้ว"></td>
       <td class="task" data-label="งาน"><span class="task-id">${esc(i.id)}</span> ${esc(i.task)}${i.notes ? `<div class="muted small">${esc(i.notes)}</div>` : ""}</td>
@@ -1376,7 +1396,8 @@ const isoDay = (offset) => {
 
 function openTaskForm(item) {
   const holder = $("#taskForm");
-  const v = item || { task: "", owner: "", due: "", priority: "medium", notes: "" };
+  const v = item || { task: "", owner: "", due: "", priority: "medium", notes: "", customer: "" };
+  loadCustomerNames();
   holder.innerHTML = `
     <form class="schedule-form task-form" id="taskFormEl" novalidate>
       <h2>${item ? `แก้ไข <span class="task-id">${esc(item.id)}</span>` : "เพิ่มรายการติดตาม"}</h2>
@@ -1385,6 +1406,8 @@ function openTaskForm(item) {
       <div class="field-row">
         <div class="field"><label for="tOwner">ผู้รับผิดชอบ</label>
           <input id="tOwner" type="text" maxlength="120" autocomplete="off" placeholder="เช่น คุณสมชาย (จัดซื้อ ACME)"></div>
+        <div class="field"><label for="tCustomer">ลูกค้า (ไม่บังคับ)</label>
+          <input id="tCustomer" type="text" maxlength="120" autocomplete="off" list="customerNames" placeholder="ให้รายการนี้ขึ้นในหน้าลูกค้า"></div>
         <div class="field"><label for="tDue">กำหนดเสร็จ</label>
           <input id="tDue" type="date">
           <div class="quick-dates" role="group" aria-label="เลือกวันเร็ว">
@@ -1410,6 +1433,7 @@ function openTaskForm(item) {
   const form = $("#taskFormEl");
   $("#tTask").value = v.task || "";
   $("#tOwner").value = v.owner || "";
+  $("#tCustomer").value = v.customer || "";
   $("#tDue").value = v.due || "";
   $("#tNotes").value = v.notes || "";
   $$("input[name=tPrio]", form).forEach((r) => (r.checked = r.value === (v.priority || "medium")));
@@ -1448,7 +1472,8 @@ function openTaskForm(item) {
     }
     task.removeAttribute("aria-invalid");
     const body = { task: task.value.trim(), owner: $("#tOwner").value.trim() || null, due: $("#tDue").value || null,
-      priority: form.elements.tPrio.value || "medium", notes: $("#tNotes").value.trim() };
+      priority: form.elements.tPrio.value || "medium", notes: $("#tNotes").value.trim(),
+      customer: $("#tCustomer").value.trim() || null };
     const save = $("#tSave");
     save.disabled = true;
     try {
@@ -1537,6 +1562,116 @@ function renderCalendar(cal) {
       b.disabled = false;
     }
   }));
+}
+
+/* ---------------------------------------------------------------- customers */
+let customerQuery = "";
+
+async function showCustomers() {
+  $("#view").innerHTML = `
+    <section class="customers" aria-labelledby="custTitle">
+      <div class="page-head"><div><h1 id="custTitle">ลูกค้า</h1>
+        <p class="lede">งาน เอกสารที่อนุมัติ และรายการติดตามของลูกค้าแต่ละราย รวมไว้ที่เดียว ก่อนโทรหรือเข้าพบเปิดหน้านี้ได้เลย</p></div></div>
+      <label class="search">${icon("search")}<span class="sr-only">ค้นหาลูกค้า</span>
+        <input type="search" id="custSearch" placeholder="ค้นหาลูกค้า" value="${esc(customerQuery)}" autocomplete="off"></label>
+      <div id="custList" aria-busy="true">${skeletonRows(3)}</div>
+    </section>`;
+  let list = [];
+  const render = () => {
+    const el = $("#custList");
+    el.removeAttribute("aria-busy");
+    const q = customerQuery.trim().toLowerCase();
+    const shown = list.filter((c) => !q || c.name.toLowerCase().includes(q));
+    if (!list.length) {
+      el.innerHTML = `<div class="empty"><h2>ยังไม่มีลูกค้า</h2><p>ใส่ชื่อลูกค้าตอนสั่งงาน หรือสร้างโฟลเดอร์
+        <code>knowledge/customers/&lt;ชื่อลูกค้า&gt;/</code> แล้ววาง <code>profile.md</code> ไว้ ลูกค้าจะขึ้นที่นี่</p></div>`;
+      return;
+    }
+    el.innerHTML = shown.length ? `<ul class="customer-list">${shown.map((c) => `<li><a href="${customerUrl(c.name)}">
+        <span class="customer-name">${esc(c.name)}</span>
+        <span class="job-meta">${[c.jobs ? `${c.jobs} งาน` : "ยังไม่มีงาน", c.waiting ? `รอตรวจ ${c.waiting}` : "",
+          c.open_tasks ? `ติดตาม ${c.open_tasks} รายการ` : "", c.last ? `ล่าสุด ${fmtTime(c.last)}` : "",
+          c.profile ? "มีโปรไฟล์" : ""].filter(Boolean).map(esc).join('<span class="sep">·</span>')}</span>
+        ${icon("chevron-right")}</a></li>`).join("")}</ul>` : `<p class="muted">ไม่พบลูกค้าที่ชื่อมีคำว่า “${esc(customerQuery)}”</p>`;
+  };
+  $("#custSearch").addEventListener("input", (e) => {
+    customerQuery = e.target.value;
+    render();
+  });
+  poll(async () => {
+    list = await api("/api/customers");
+    render();
+    return 30000;
+  });
+}
+
+async function showCustomer(name) {
+  const c = await api(`/api/customers/${encodeURIComponent(name)}`);
+  const start = (type) => `#/?type=${type}&customer=${encodeURIComponent(c.name)}`;
+  const waiting = c.jobs.filter((j) => j.status === "needs_review").length;
+  /* one row per approved job: its Word file (to send) and its text (.md) */
+  const approved = [];
+  c.documents.forEach((d) => {
+    let row = approved.find((r) => r.job_id === d.job_id);
+    if (!row) approved.push((row = { ...d, files: [] }));
+    row.files.push(d.path);
+  });
+  const docUrl = (path) => `/api/knowledge/file/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const due = (i) => {
+    if (!i.due) return "ยังไม่กำหนด";
+    const d = Math.round((new Date(`${i.due}T00:00:00`) - today) / 86400000);
+    return `${fmtDate(i.due)}${d < 0 ? ` (เลยมา ${-d} วัน)` : d === 0 ? " (วันนี้)" : ""}`;
+  };
+  $("#view").innerHTML = `
+    <a class="back" href="#/customers">${icon("chevron-left")}ลูกค้าทั้งหมด</a>
+    <header class="job-head customer-head">
+      <div class="job-head-main">
+        <div class="title-row"><h1>${esc(c.name)}</h1></div>
+        <p class="job-meta">${[`${c.jobs.length} งาน`, waiting ? `รอตรวจ ${waiting}` : "", `ติดตาม ${c.tasks.length} รายการ`,
+          `อนุมัติแล้ว ${new Set(c.documents.map((d) => d.job_id)).size} งาน`].filter(Boolean).map(esc).join('<span class="sep">·</span>')}</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="${start("sales-brief")}">${icon("users")}เตรียมพบลูกค้า</a>
+        <a class="btn" href="${start("proposal-draft")}">${icon("briefcase")}ร่างใบเสนอราคา</a>
+        <a class="btn primary" href="${start("general")}">${icon("message")}สั่งงานอื่น</a>
+      </div>
+    </header>
+    <div class="customer-grid">
+      <div class="customer-main">
+        <section class="group" aria-labelledby="cTasks">
+          <h2 id="cTasks">รายการติดตามที่เปิดอยู่ <span class="group-count">${c.tasks.length}</span></h2>
+          ${c.tasks.length ? `<ul class="customer-tasks">${c.tasks.map((i) => `<li>
+            <span class="task-id">${esc(i.id)}</span> ${esc(i.task)}
+            <span class="job-meta">${esc(i.owner || "ยังไม่ระบุผู้รับผิดชอบ")}<span class="sep">·</span>${esc(due(i))}</span></li>`).join("")}</ul>`
+            : `<p class="muted small">ไม่มีรายการค้าง ใส่ชื่อลูกค้าในรายการติดตามงาน หรือในงานสรุปประชุม รายการจะขึ้นที่นี่</p>`}
+        </section>
+        <section class="group" aria-labelledby="cJobs">
+          <h2 id="cJobs">งาน <span class="group-count">${c.jobs.length}</span></h2>
+          ${c.jobs.length ? `<ul class="job-list">${c.jobs.map(jobRow).join("")}</ul>` : `<p class="muted small">ยังไม่มีงานของลูกค้ารายนี้</p>`}
+        </section>
+      </div>
+      <aside class="customer-side">
+        <section class="group" aria-labelledby="cDocs">
+          <h2 id="cDocs">เอกสารที่อนุมัติแล้ว <span class="group-count">${approved.length}</span></h2>
+          ${approved.length ? `<ul class="doc-list">${approved.map((d) => `<li>
+            <a href="#/job/${encodeURIComponent(d.job_id)}" class="doc-title">${esc(d.title)}</a>
+            <span class="job-meta">อนุมัติ ${esc(fmtTime(d.approved_at))}</span>
+            <span class="doc-links">${d.files.sort((a, b) => /\.docx$/i.test(b) - /\.docx$/i.test(a)).map((f) =>
+              `<a href="${docUrl(f)}" target="_blank" rel="noopener">${/\.docx$/i.test(f) ? `${icon("word")}Word` : `${icon("file")}${esc(f.split(".").pop())}`}</a>`).join("")}</span></li>`).join("")}</ul>`
+            : `<p class="muted small">อนุมัติงานของลูกค้ารายนี้แล้ว เอกสาร (และไฟล์ Word) จะขึ้นที่นี่</p>`}
+        </section>
+        <section class="group" aria-labelledby="cProfile">
+          <h2 id="cProfile">โปรไฟล์</h2>
+          ${c.profile ? `${c.profile.text ? `<article class="doc profile-doc">${renderMarkdown(c.profile.text)}</article>` : ""}
+            <p class="small muted">จากโฟลเดอร์ <code>knowledge/${esc(c.profile.folder)}/</code> แก้ได้ใน File Station</p>
+            ${c.profile.files.length ? `<ul class="doc-list">${c.profile.files.map((f) => `<li><a href="${docUrl(`knowledge/${c.profile.folder}/${f}`)}" target="_blank" rel="noopener">${icon("file")}${esc(f)}</a></li>`).join("")}</ul>` : ""}`
+            : `<p class="muted small">ยังไม่มีโปรไฟล์ สร้างโฟลเดอร์ <code>knowledge/customers/${esc(c.name)}/</code> แล้ววาง <code>profile.md</code>
+              (ผู้ติดต่อ ที่ตั้ง อุปกรณ์ที่ใช้ ข้อสังเกต) Claude จะอ่านโปรไฟล์นี้ทุกครั้งที่ทำงานให้ลูกค้ารายนี้</p>`}
+        </section>
+      </aside>
+    </div>`;
 }
 
 /* ---------------------------------------------------------------- recurring jobs (งานประจำ) */
@@ -1681,7 +1816,7 @@ async function openScheduleForm(s) {
         <div class="chips" role="radiogroup" aria-labelledby="sTypeLabel">${types.map((t) => `
           <label class="type-option"><input type="radio" name="sType" value="${esc(t.id)}"><span>${icon(TYPE_ICON[t.id] || "message")}${esc(t.label)}</span></label>`).join("")}</div></div>
       <div class="field" id="sCustomerField" hidden><label for="sCustomer">ชื่อลูกค้า</label>
-        <input id="sCustomer" type="text" autocomplete="off" placeholder="ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/"></div>
+        <input id="sCustomer" type="text" autocomplete="off" list="customerNames" placeholder="ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/"></div>
       <div class="field"><label for="sInstr">สิ่งที่ให้ Claude ทำทุกรอบ</label>
         <textarea id="sInstr" rows="4" placeholder="เช่น สรุปงานที่เสร็จและงานค้างของสัปดาห์นี้ เป็นรายงานสั้นส่งหัวหน้า"></textarea></div>
       <div class="field"><span class="label" id="sDaysLabel">วัน</span>
@@ -1964,18 +2099,24 @@ function route() {
   editing = null;
   viewToken += 1;
   const hash = location.hash || "#/";
-  const tab = hash.startsWith("#/tasks") ? "tasks" : hash.startsWith("#/schedules") ? "schedules" : hash.startsWith("#/system") ? "system" : "jobs";
+  const tab = hash.startsWith("#/tasks") ? "tasks" : hash.startsWith("#/customer") ? "customers"
+    : hash.startsWith("#/schedules") ? "schedules" : hash.startsWith("#/system") ? "system" : "jobs";
   $$(".nav a").forEach((a) => {
     const on = a.dataset.tab === tab;
     a.classList.toggle("active", on);
     if (on) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
+    if (on && a.parentElement.scrollWidth > a.parentElement.clientWidth) { // phones: the row scrolls sideways
+      a.parentElement.scrollLeft = a.offsetLeft - (a.parentElement.clientWidth - a.offsetWidth) / 2;
+    }
   });
   window.scrollTo(0, 0);
   if (lastStatus) refreshStatus(false);
   const fail = (err) => ($("#view").innerHTML = `<p class="muted">${esc(err.message)}</p>`);
   if (hash.startsWith("#/job/")) return showJob(decodeURIComponent(hash.slice(6)));
   if (hash.startsWith("#/tasks")) return showTasks();
+  if (hash.startsWith("#/customers")) return showCustomers().catch(fail);
+  if (hash.startsWith("#/customer/")) return showCustomer(decodeURIComponent(hash.slice(11))).catch(fail);
   if (hash.startsWith("#/schedules")) return showSchedules().catch(fail);
   if (hash.startsWith("#/system")) return showSystem().catch(fail);
   return showHome().catch(fail);

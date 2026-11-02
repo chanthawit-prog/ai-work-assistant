@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import sysmon
+from . import customers, sysmon
 from .calendar_feed import tasks_ics
 from .claude_status import check_claude
 from .config import Settings
@@ -39,7 +39,7 @@ from .store import AREAS, JOB_ID_RE, TRASH_DAYS, JobStore, now_iso, read_json, r
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
@@ -83,6 +83,7 @@ class TaskIn(BaseModel):
     due: str | None = None
     priority: str = "medium"
     notes: str = ""
+    customer: str | None = None
 
 
 class HandoffIn(BaseModel):
@@ -652,6 +653,18 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     async def delete_task(item_id: str):
         tasks.delete(item_id)
         return {"ok": True}
+
+    # -- customers ---------------------------------------------------------------
+    @app.get("/api/customers")
+    async def list_customers():
+        return await asyncio.to_thread(customers.summary, store, tasks, settings.knowledge_dir)
+
+    @app.get("/api/customers/{name}")
+    async def customer_page(name: str):
+        found = await asyncio.to_thread(customers.detail, store, tasks, settings.knowledge_dir, name)
+        if found is None:
+            raise KeyError(name)
+        return {**found, "jobs": [job_view(j, full=False) for j in found["jobs"]]}
 
     # -- calendar feed of due dates ---------------------------------------------
     def calendar_info() -> dict:

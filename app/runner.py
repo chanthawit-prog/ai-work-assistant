@@ -31,7 +31,7 @@ from asyncio.subprocess import PIPE
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import sysmon
+from . import customers, sysmon
 from .config import Settings
 from .convert import prepare_inputs
 from .events import RunMeta, summarize
@@ -94,7 +94,9 @@ OOM_MESSAGES = {
 
 def claude_env(low_memory: bool = True) -> dict:
     env = dict(os.environ)
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    # CLAUDE_EFFORT is this app's own setting (it becomes --effort); Claude Code may read a variable of the same name,
+    # so it must not leak through and override the level chosen for the job
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_EFFORT"):
         env.pop(key, None)
     if not env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
@@ -179,6 +181,14 @@ class Runner:
             write_json(ctx / "action_items.json", self.tasks.open_items())
         if "recent" in include:
             self._copy_recent(ctx / "recent")
+        if job_type.id in ("sales-brief", "proposal-draft"):
+            # the customer's memory: what was approved for them before (quotations, meetings, answers), newest first
+            history = customers.history_files(self.store, self.settings, job)
+            if history:
+                dest = ctx / "customer-history"
+                dest.mkdir(exist_ok=True)
+                for path in history:
+                    shutil.copy2(path, dest / path.name)
         if job_type.id == "sales-brief":
             customer = str((job.get("params") or {}).get("customer", "")).strip().lower()
             meetings = self.settings.library_dir / "meeting-summary"

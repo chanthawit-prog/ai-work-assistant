@@ -64,6 +64,8 @@ def tasks_ics(items: list[dict], base_url: str = "", now: datetime | None = None
         level, label = PRIORITY.get(item.get("priority"), PRIORITY["medium"])
         title = item["task"] + (f" ({item['owner']})" if item.get("owner") else "")
         details = [f"รหัส: {item['id']}", f"ผู้รับผิดชอบ: {item.get('owner') or 'ยังไม่ระบุ'}", f"ความสำคัญ: {label}"]
+        if item.get("customer"):
+            details.append(f"ลูกค้า: {item['customer']}")
         if item.get("source_title"):
             details.append(f"ที่มา: {item['source_title']}")
         if item.get("notes"):

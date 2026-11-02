@@ -22,9 +22,9 @@ class JobType:
     fields: tuple[Field, ...]
     outputs: tuple[str, ...]  # paths relative to the job folder; the first one is shown first
     allow_python: bool = False  # lets Claude run `python3` for calculations
-    # how hard Claude thinks (claude --effort). Always set: left unset, Claude Code thought for minutes even on an
-    # email (trial, 2 Nov: 508 s and 77k output tokens; at "medium" 28 s, at "high" 42 s, with the same content).
-    # "" would leave Claude Code's own default
+    # how hard Claude thinks (claude --effort), always passed so the time a job takes is predictable. Trial, 2 Nov,
+    # the same cover email: medium 28 s, high 42 s, Claude Code's own default 51 s, max 508 s; the same
+    # engineering question: high 43 s, max 466 s, same answer. "" would leave Claude Code's own default
     effort: str = "medium"
 
     @property
@@ -40,6 +40,8 @@ class JobType:
 EFFORTS = ("low", "medium", "high", "max")  # on the dashboard: เร็ว ปกติ ละเอียด ละเอียดที่สุด
 TITLE = Field("title", "ชื่องาน", placeholder="เช่น ประชุมโครงการ ABC ครั้งที่ 3")
 FILES = Field("files", "ไฟล์ประกอบ", kind="files")
+# optional on the other types: links the job (and a meeting's action items) to the customer's page
+CUSTOMER = Field("customer", "ลูกค้า (ไม่บังคับ)", placeholder="ถ้างานนี้เป็นของลูกค้ารายใด")
 
 JOB_TYPES: dict[str, JobType] = {
     t.id: t
@@ -53,6 +55,7 @@ JOB_TYPES: dict[str, JobType] = {
                 TITLE,
                 Field("files", "Transcript / บันทึกประชุม (.txt .vtt .srt .docx .pdf)", kind="files", required=True),
                 Field("instructions", "คำสั่งเพิ่มเติม", kind="textarea", placeholder="เช่น เน้นประเด็นงบประมาณ"),
+                CUSTOMER,
             ),
             outputs=("output/summary.md", "output/action_items.json"),
             effort="medium",
@@ -106,11 +109,12 @@ JOB_TYPES: dict[str, JobType] = {
             fields=(
                 TITLE,
                 Field("instructions", "คำถาม / โจทย์", kind="textarea", required=True),
+                CUSTOMER,
                 FILES,
             ),
             outputs=("output/answer.md",),
             allow_python=True,
-            effort="high",  # trial: the nameplate question took 43 s at "high" against 466 s unset, same answer
+            effort="high",  # careful work at a predictable pace; "max" (ละเอียดที่สุด) is there for hard problems
         ),
         JobType(
             id="general",
@@ -120,6 +124,7 @@ JOB_TYPES: dict[str, JobType] = {
             fields=(
                 TITLE,
                 Field("instructions", "สิ่งที่ต้องการให้ทำ", kind="textarea", required=True),
+                CUSTOMER,
                 FILES,
             ),
             outputs=("output/result.md",),

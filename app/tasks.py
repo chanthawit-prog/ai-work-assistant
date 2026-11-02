@@ -12,7 +12,7 @@ from .store import now_iso, read_json, write_json
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PRIORITIES = ("high", "medium", "low")
-FIELDS = ("task", "owner", "due", "priority", "notes")
+FIELDS = ("task", "owner", "due", "priority", "notes", "customer")
 MAX_DISMISSED = 500  # meeting items you deleted, remembered so approving the meeting again skips them
 
 
@@ -46,7 +46,7 @@ def clean_fields(raw: dict) -> dict:
     if priority not in PRIORITIES:
         raise ValueError("ความสำคัญต้องเป็น สูง กลาง หรือ ต่ำ")
     return {"task": task, "owner": _text(raw.get("owner"), 120) or None, "due": due, "priority": priority,
-            "notes": _text(raw.get("notes"), 1000)}
+            "notes": _text(raw.get("notes"), 1000), "customer": _text(raw.get("customer"), 120) or None}
 
 
 class TaskStore:
@@ -91,6 +91,7 @@ class TaskStore:
                     "due": _clean_due(raw.get("due")),
                     "priority": priority if priority in PRIORITIES else "medium",
                     "notes": _text(raw.get("notes"), 1000),
+                    "customer": _text((job.get("params") or {}).get("customer"), 120) or None,
                     "status": "open",
                     "source_job": job["id"],
                     "source_title": job.get("title", ""),

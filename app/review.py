@@ -81,7 +81,8 @@ def save_edit(store: JobStore, job_id: str, rel: str, text: str, base_sha: str =
 
 
 def slugify(text: str) -> str:
-    slug = re.sub(r"-+", "-", safe_filename(text).replace(" ", "-")).strip("-")
+    """A file-name-friendly title: spaces and the "·" of hand-off titles become single dashes."""
+    slug = re.sub(r"-+", "-", re.sub(r"[\s·]+", "-", safe_filename(text))).strip("-")
     return slug[:60] or "job"
 
 
