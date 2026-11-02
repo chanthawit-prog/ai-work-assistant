@@ -487,6 +487,7 @@ async function showHome() {
         </div>
       </form>
     </section>
+    <section class="today" id="today" aria-labelledby="todayTitle" hidden></section>
     <div class="list-tools">
       <label class="search">${icon("search")}<span class="sr-only">ค้นหางาน</span>
         <input type="search" id="jobSearch" placeholder="ค้นหางาน: ชื่องาน ลูกค้า หรือชนิดงาน" value="${esc(jobQuery)}" autocomplete="off"></label>
@@ -606,6 +607,40 @@ async function showHome() {
     renderLists(jobs);
     return jobs.some((j) => j.status === "running" || j.status === "queued") ? 2000 : 6000;
   });
+  poll(async () => {
+    renderToday(await api("/api/today"));
+    return 60000;
+  });
+}
+
+/* วันนี้: follow-ups that are late or due today, recurring jobs of the day, results waiting for you */
+function renderToday(t) {
+  const el = $("#today");
+  if (!el) return;
+  const items = [...t.overdue, ...t.due_today];
+  const more = Math.max(0, t.overdue_count + t.due_today_count - items.length);
+  const facts = [
+    t.overdue_count ? `<b class="late">เลยกำหนด ${t.overdue_count}</b>` : "",
+    t.due_today_count ? `<b>ครบกำหนดวันนี้ ${t.due_today_count}</b>` : "",
+    t.week_count ? `อีก 7 วัน ${t.week_count}` : "",
+    t.waiting_count ? `รอคุณตรวจ ${t.waiting_count} งาน` : "",
+  ].filter(Boolean).map((f) => `<span class="fact">${f}</span>`).join('<span class="sep">·</span>');
+  const followups = items.length ? `<ul class="today-list">${items.map((i) => `<li>
+      <span class="today-when ${i.days < 0 ? "late" : "now"}">${i.days < 0 ? `เลยมา ${-i.days} วัน` : "วันนี้"}</span>
+      <span><span class="task-id">${esc(i.id)}</span> ${esc(i.task)}
+      ${i.owner || i.customer ? `<span class="today-meta">${[i.owner, i.customer ? `ลูกค้า ${i.customer}` : ""].filter(Boolean).map(esc).join(" · ")}</span>` : ""}</span></li>`).join("")}</ul>`
+    : `<p class="muted small">ไม่มีรายการที่เลยกำหนดหรือครบกำหนดวันนี้</p>`;
+  const runs = t.runs.length ? `<ul class="today-list">${t.runs.map((r) => `<li>
+      <span class="today-when num">${esc(r.time)}</span><span>${esc(r.name)}${r.done ? ` <span class="today-done">${icon("check")}ทำแล้ว</span>` : r.skipped ? ` <span class="muted">ข้ามรอบนี้ (รอบก่อนยังไม่เสร็จ)</span>` : ""}</span></li>`).join("")}</ul>`
+    : `<p class="muted small">ไม่มีงานประจำวันนี้</p>`;
+  el.hidden = false;
+  el.innerHTML = `<div class="today-head"><h2 id="todayTitle">วันนี้ <span class="today-date">${esc(t.label)}</span></h2>
+      <p class="today-facts">${facts || "ไม่มีงานที่เลยกำหนด ครบกำหนด หรือรอตรวจ"}</p></div>
+    <div class="today-grid">
+      <div><h3>${icon("clock")}ติดตามงาน</h3>${followups}
+        <a class="small" href="#/tasks">${more ? `อีก ${more} รายการ · ` : ""}ดูรายการติดตามทั้งหมด</a></div>
+      <div><h3>${icon("repeat")}งานประจำวันนี้</h3>${runs}<a class="small" href="#/schedules">ดูงานประจำ</a></div>
+    </div>`;
 }
 
 function skeletonRows(n = 4) {
@@ -2061,7 +2096,10 @@ async function showSystem() {
       ${row("ช่องทาง", s.notify.channels.length ? s.notify.channels.map((x) => esc(CHANNELS[x] || x)).join(", ") : `<span class="muted">ยังไม่ได้ตั้งค่า</span>`)}
       ${row("แจ้งเมื่อ", s.notify.on.map((x) => esc(EVENTS[x] || x)).join(", "))}
       ${row("ลิงก์ในข้อความ", s.notify.dashboard_url ? `<code>${esc(s.notify.dashboard_url)}</code>` : `<span class="muted">ตั้ง DASHBOARD_URL เพื่อให้กดเปิดงานได้</span>`)}
-    </dl>${s.notify.channels.length ? `<button type="button" class="btn" id="sysNotify">${icon("bell")}ส่งข้อความทดสอบ</button>`
+      ${row("สรุปงานตอนเช้า", s.notify.digest_time ? `ทุก ${esc(s.followup.days.map((d) => DAYS[d] || d).join(" "))} เวลา ${esc(s.notify.digest_time)} (เมื่อมีงานเลยกำหนด ครบกำหนด รอตรวจ หรืองานประจำ)`
+        : `<span class="muted">ปิดอยู่ ตั้ง DIGEST_TIME เช่น 07:30 ในไฟล์ .env</span>`)}
+    </dl>${s.notify.channels.length ? `<div class="form-actions"><button type="button" class="btn" id="sysNotify">${icon("bell")}ส่งข้อความทดสอบ</button>
+      <button type="button" class="btn" id="sysDigest">${icon("calendar")}ส่งสรุปวันนี้ตอนนี้</button></div>`
       : `<p class="small muted">ตั้งค่า NOTIFY_SYNOLOGY_CHAT_URL, NOTIFY_LINE_TOKEN + NOTIFY_LINE_TO หรือ NOTIFY_WEBHOOK_URL ในไฟล์ .env แล้วสั่ง Build ใหม่</p>`}</section>
 
     <section class="sys-section"><h2>การทำงาน</h2><dl class="facts">
@@ -2094,6 +2132,16 @@ async function showSystem() {
   loadReadiness();
   wireKnowledge();
   loadKnowledge().catch((err) => { const el = $("#kbStatus"); if (el) el.innerHTML = `<p class="small muted">${esc(err.message)}</p>`; });
+  const digestBtn = $("#sysDigest");
+  if (digestBtn) digestBtn.addEventListener("click", async () => {
+    digestBtn.disabled = true;
+    try {
+      const r = await postJSON("/api/notify/digest");
+      const failed = Object.entries(r).filter(([, v]) => v !== "ok");
+      toast(failed.length ? `ส่งไม่สำเร็จ: ${failed.map(([k, v]) => `${CHANNELS[k] || k} (${v})`).join(", ")}` : "ส่งสรุปวันนี้แล้ว", failed.length ? "bad" : "");
+    } catch (err) { toast(err.message, "bad"); }
+    digestBtn.disabled = false;
+  });
   const notifyBtn = $("#sysNotify");
   if (notifyBtn) notifyBtn.addEventListener("click", async () => {
     notifyBtn.disabled = true;

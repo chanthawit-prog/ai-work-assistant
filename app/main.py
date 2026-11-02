@@ -39,9 +39,10 @@ from .schedules import create_job as create_scheduled_job
 from .state import RuntimeState
 from .store import AREAS, JOB_ID_RE, TRASH_DAYS, JobStore, now_iso, read_json, revision
 from .tasks import TaskStore
+from .today import DigestScheduler, summary as today_summary
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
@@ -286,6 +287,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     scheduler = FollowupScheduler(store, tasks, state, settings)
     schedules = ScheduleStore(settings.data_dir / "config" / "schedules.json")
     recurring = RecurringScheduler(store, schedules)
+    digest = DigestScheduler(store, tasks, schedules, state, settings, notifier)
 
     async def refresh_claude() -> dict:
         status = await check_claude(settings)
@@ -343,7 +345,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         if start_background:
             background = [asyncio.create_task(c) for c in
                           (runner.loop(), inbox.loop(), scheduler.loop(), recurring.loop(), claude_check_loop(),
-                           knowledge.loop(), trash_loop())]
+                           knowledge.loop(), trash_loop(), digest.loop())]
             log.info("data=%s knowledge=%s claude=%s", settings.data_dir, settings.knowledge_dir, settings.claude_bin)
         yield
         for task in background:
@@ -603,6 +605,19 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             raise ValueError("ยังไม่ได้ตั้งค่าช่องทางแจ้งเตือนในไฟล์ .env")
         return await notifier.send("ทดสอบการแจ้งเตือนจาก AI Work Assistant: ตั้งค่าถูกต้องแล้ว", {"event": "test"})
 
+    @app.post("/api/notify/digest")
+    async def notify_digest():
+        """Send today's summary now (the morning message, to check how it looks)."""
+        if not notifier.channels:
+            raise ValueError("ยังไม่ได้ตั้งค่าช่องทางแจ้งเตือนในไฟล์ .env")
+        text = await asyncio.to_thread(digest.build) or "วันนี้ไม่มีงานที่เลยกำหนด ครบกำหนด หรือรอตรวจ"
+        return await notifier.send(text, {"event": "digest"})
+
+    @app.get("/api/today")
+    async def today():
+        return await asyncio.to_thread(today_summary, store, tasks, schedules, settings, None,
+                                       state.get("followup_last"))
+
     @app.get("/api/system")
     async def system():
         def count_files(root: Path, cap: int = 5000) -> int:
@@ -625,7 +640,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
                        "timeout_min": settings.job_timeout_min, "model": settings.claude_model,
                        "effort": settings.claude_effort, "allow_python": settings.allow_python},
             "followup": {"time": settings.followup_time, "days": list(settings.followup_days)},
-            "notify": {"channels": notifier.channels, "on": list(settings.notify_on),
+            "notify": {"channels": notifier.channels, "on": list(settings.notify_on), "digest_time": settings.digest_time,
                        "dashboard_url": settings.dashboard_url},
             "storage": {"data_dir": str(settings.data_dir), "knowledge_dir": str(settings.knowledge_dir),
                         "knowledge_files": await asyncio.to_thread(count_files, settings.knowledge_dir),

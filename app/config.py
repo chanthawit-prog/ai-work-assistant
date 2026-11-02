@@ -36,6 +36,7 @@ class Settings:
     inbox_poll_sec: int = 15
     followup_time: str = "08:00"
     followup_days: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri")
+    digest_time: str = ""                  # morning summary through the notification channels ("" = off), e.g. 07:30
     allow_python: bool = True
     dashboard_user: str = "admin"
     dashboard_password: str = ""
@@ -115,6 +116,7 @@ class Settings:
             inbox_poll_sec=_int("INBOX_POLL_SEC", 15),
             followup_time=os.environ.get("FOLLOWUP_TIME", "08:00").strip(),
             followup_days=days,
+            digest_time=os.environ.get("DIGEST_TIME", "").strip(),
             allow_python=_bool("ALLOW_PYTHON", True),
             dashboard_user=os.environ.get("DASHBOARD_USER", "admin").strip() or "admin",
             dashboard_password=os.environ.get("DASHBOARD_PASSWORD", ""),
