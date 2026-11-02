@@ -565,6 +565,24 @@ td.num { white-space: nowrap; }
 .kb-notes ul { margin: var(--s2) 0 0; padding-left: 1.2em; }
 mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color: var(--ink); }
 
+/* ============================================================== readiness (System page) */
+.ready-summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: 0 0 var(--s3); font-weight: 600; }
+.ready-summary.ready-ok { color: var(--ok); }
+.ready-summary.ready-warn { color: var(--review); }
+.ready-summary.ready-fail { color: var(--bad); }
+.ready-summary .muted { font-weight: 400; }
+.checks { display: grid; gap: var(--s2); margin: 0 0 var(--s3); padding: 0; list-style: none; }
+.checks li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--s2); font-size: var(--fs-small); }
+.checks b { font-weight: 600; }
+.check-detail { color: var(--ink-2); overflow-wrap: anywhere; }
+.check-mark { display: inline-grid; place-items: center; width: 24px; height: 24px; }
+.check-ok .check-mark { color: var(--ok); }
+.check-warn .check-mark { color: var(--review); }
+.check-fail .check-mark { color: var(--bad); }
+.check-info .check-mark .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.check-fix { display: flex; align-items: flex-start; gap: var(--s1); margin-top: 2px; color: var(--ink); overflow-wrap: anywhere; }
+.check-fix .icon { flex: none; margin-top: 0.2em; color: var(--ink-3); }
+
 /* ============================================================== customers */
 .customers { max-width: 820px; margin: 0 auto; }
 .customers .search { margin-bottom: var(--s4); }

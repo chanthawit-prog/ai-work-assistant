@@ -31,6 +31,7 @@ from .handoff import HANDOFF_TYPES, default_files, handoff
 from .jobtypes import EFFORTS, JOB_TYPES
 from .knowledge import KnowledgeIndex, kb_search
 from .notify import Notifier
+from .readiness import run_checks
 from .review import EDITABLE_EXTS, approve, file_sha, save_edit, slugify
 from .runner import MESSAGE_STATUSES, Runner
 from .schedules import INCLUDES, ScheduleStore, next_run, schedulable_types
@@ -40,7 +41,7 @@ from .store import AREAS, JOB_ID_RE, TRASH_DAYS, JobStore, now_iso, read_json, r
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.10.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
@@ -349,7 +350,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             task.cancel()
 
     app = FastAPI(title="AI Work Assistant", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.settings, app.state.store, app.state.runner = settings, store, runner
+    app.state.settings, app.state.store, app.state.runner, app.state.runtime = settings, store, runner, state
     app.state.tasks, app.state.inbox, app.state.scheduler, app.state.notifier = tasks, inbox, scheduler, notifier
     app.state.schedules, app.state.recurring, app.state.knowledge = schedules, recurring, knowledge
     if settings.dashboard_password:
@@ -435,6 +436,18 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     @app.post("/api/claude/check")
     async def claude_check():
         return await refresh_claude()
+
+    @app.get("/api/readiness")
+    async def readiness():
+        """Is this installation ready? (also: docker exec ai-work-assistant python3 -m app.readiness)"""
+        claude = state.get("claude") or await refresh_claude()
+        files = None
+        if settings.kb_enabled:
+            try:
+                files = (await asyncio.to_thread(knowledge.status))["files"]
+            except Exception:
+                log.exception("knowledge index unreadable")
+        return await asyncio.to_thread(run_checks, settings, claude, notifier.channels, files)
 
     @app.get("/api/job-types")
     async def job_types():

@@ -285,7 +285,9 @@ ai-assistant/
 2. คัดลอก `.env.example` เป็น `.env` แล้วแก้ path ตั้ง `DASHBOARD_PASSWORD` และช่องทางแจ้งเตือน (ถ้าต้องการ)
 3. Container Manager → Project → Create → เลือกโฟลเดอร์โค้ด → Build และ Start
 4. ล็อกอิน Claude ครั้งเดียว: `sudo docker exec -it ai-work-assistant claude auth login`
-5. เปิด `http://<IP ของ NAS>:8080`
+5. เปิด `http://<IP ของ NAS>:8080` แล้วไปที่หน้า **ระบบ → ความพร้อมของระบบ** ระบบตรวจทุกส่วน
+   (ล็อกอิน โฟลเดอร์ รั้ว Python รหัสผ่าน เขตเวลา หน่วยความจำ) และบอกวิธีแก้เป็นภาษาไทย
+   ตรวจจาก terminal ได้ด้วย `sudo docker exec ai-work-assistant python3 -m app.readiness`
 
 อยากลองระบบก่อนโดยไม่ใช้ Claude จริง ให้ตั้ง `CLAUDE_BIN=/opt/app/scripts/fake-claude` ใน `.env`
 dashboard จะขึ้นป้าย "โหมดสาธิต"
@@ -393,3 +395,4 @@ DATA_DIR=./data KNOWLEDGE_DIR=./knowledge CLAUDE_BIN=./scripts/fake-claude \
 - [x] ระดับการคิดตามชนิดงานและเลือกเองได้ และลบงานลงถังขยะ
 - [x] หน้าลูกค้า และให้ Claude เห็นประวัติที่อนุมัติแล้วของลูกค้าตอนร่างใบเสนอราคาและเตรียมพบลูกค้า
 - [x] ความปลอดภัย: รั้ว Python ของ Claude กัน prompt injection กันคำขอข้ามเว็บไซต์ จำกัดการเดารหัสผ่าน และกัน zip bomb
+- [x] ตรวจความพร้อมหลังติดตั้ง (หน้าระบบ และ `python3 -m app.readiness`) และทดสอบ Docker image ใหม่กับโค้ดล่าสุด

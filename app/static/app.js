@@ -2028,6 +2028,8 @@ async function showSystem() {
   $("#sysBody").innerHTML = `
     ${sec.password === false ? `<p class="notice warn">${icon("alert")}<span><b>ยังไม่ได้ตั้งรหัสผ่าน dashboard</b> ใครที่อยู่ในวง LAN เดียวกัน
       เปิดหน้านี้ อ่านงาน และสั่งงาน Claude ด้วย subscription ของคุณได้ ตั้ง <code>DASHBOARD_PASSWORD</code> ในไฟล์ .env แล้ว Build ใหม่</span></p>` : ""}
+    <section class="sys-section" id="readiness" aria-busy="true"><h2>ความพร้อมของระบบ</h2>
+      <p class="muted small">กำลังตรวจ…</p></section>
     <section class="sys-section"><h2>Claude</h2><dl class="facts">
       ${row("สถานะ", c.logged_in ? `<span class="badge s-done">เชื่อมต่อแล้ว</span>` : `<span class="badge s-failed">ยังไม่ได้เชื่อม</span>`)}
       ${row("วิธีล็อกอิน", esc(c.method || "ยังไม่ทราบ"))}
@@ -2089,6 +2091,7 @@ async function showSystem() {
     } catch (err) { toast(err.message, "bad"); }
     route();
   });
+  loadReadiness();
   wireKnowledge();
   loadKnowledge().catch((err) => { const el = $("#kbStatus"); if (el) el.innerHTML = `<p class="small muted">${esc(err.message)}</p>`; });
   const notifyBtn = $("#sysNotify");
@@ -2101,6 +2104,39 @@ async function showSystem() {
     } catch (err) { toast(err.message, "bad"); }
     notifyBtn.disabled = false;
   });
+}
+
+/* is the installation ready: run once after installing or updating on the NAS */
+const READY = { ok: ["check", "พร้อมใช้งาน"], warn: ["alert", "ใช้งานได้ แต่มีข้อควรแก้"], fail: ["x", "ยังไม่พร้อม แก้ข้อที่มีเครื่องหมาย ✗ ก่อน"] };
+async function loadReadiness() {
+  const el = $("#readiness");
+  if (!el) return;
+  el.setAttribute("aria-busy", "true");
+  let r;
+  try {
+    r = await api("/api/readiness");
+  } catch (err) {
+    el.innerHTML = `<h2>ความพร้อมของระบบ</h2><p class="muted">${esc(err.message)}</p>`;
+    return;
+  }
+  if (!$("#readiness")) return; // left the page meanwhile
+  const mark = { ok: icon("check"), warn: icon("alert"), fail: icon("x"), info: `<span class="dot" aria-hidden="true"></span>` };
+  const word = { ok: "ผ่าน", warn: "ควรแก้", fail: "ต้องแก้", info: "ข้อมูล" };
+  el.removeAttribute("aria-busy");
+  el.innerHTML = `<h2>ความพร้อมของระบบ</h2>
+    <p class="ready-summary ready-${esc(r.status)}">${icon(READY[r.status][0])}<span>${esc(READY[r.status][1])}</span>
+      <span class="muted small">ตรวจเมื่อ ${esc(fmtTime(r.checked_at))}</span></p>
+    <ul class="checks">${r.items.map((i) => `<li class="check-${esc(i.status)}">
+      <span class="check-mark" title="${esc(word[i.status])}">${mark[i.status] || ""}</span><span class="sr-only">${esc(word[i.status])}:</span>
+      <div><b>${esc(i.label)}</b> <span class="check-detail">${esc(i.detail)}</span>
+      ${i.fix ? `<div class="check-fix">${icon("chevron-right")}${esc(i.fix)}</div>` : ""}</div></li>`).join("")}</ul>
+    <button type="button" class="btn" id="readyAgain">${icon("retry")}ตรวจอีกครั้ง</button>
+    <p class="small muted">ตรวจจาก terminal ได้ด้วย <code>sudo docker exec ai-work-assistant python3 -m app.readiness</code></p>`;
+  $("#readyAgain").onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    await api("/api/claude/check", { method: "POST" }).catch(() => null); // the login too, not only the cached status
+    loadReadiness();
+  };
 }
 
 /* ---------------------------------------------------------------- router */
