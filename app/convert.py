@@ -23,7 +23,8 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 TEXT_EXTS = {".txt", ".md", ".vtt", ".srt", ".csv", ".json"}
 EXCEL_EXTS = {".xlsx", ".xlsm"}
-READABLE_EXTS = TEXT_EXTS | EXCEL_EXTS | {".pdf", ".docx", ".png", ".jpg", ".jpeg"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}  # what Claude Code's Read tool shows Claude as a picture
+READABLE_EXTS = TEXT_EXTS | EXCEL_EXTS | IMAGE_EXTS | {".pdf", ".docx"}
 CONVERTED = ".converted.json"  # which workbooks were already turned into CSV (hidden: not listed as an input)
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac", ".mp4", ".webm", ".mov", ".wma"}
 
@@ -113,6 +114,9 @@ def prepare_inputs(input_dir: Path) -> list[str]:
                     target.write_text(docx_to_text(path), encoding="utf-8")
                 except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
                     warnings.append(f"อ่านไฟล์ Word ไม่ได้: {path.name}")
+        elif ext in (".heic", ".heif"):
+            warnings.append(f"{path.name} เป็นรูปแบบ HEIC ของ iPhone ซึ่ง Claude เปิดไม่ได้ ให้ส่งเป็น JPG แทน "
+                            "(แนบผ่าน Safari จะแปลงเป็น JPG ให้เอง หรือตั้ง กล้อง › รูปแบบ › ใช้ร่วมกันได้มากที่สุด)")
         elif ext in AUDIO_EXTS:
             warnings.append(f"{path.name} เป็นไฟล์เสียง/วิดีโอ ต้องถอดเป็นข้อความก่อน (เช่น transcript จาก Teams)")
         elif ext not in READABLE_EXTS:

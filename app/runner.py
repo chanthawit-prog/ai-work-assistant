@@ -208,8 +208,8 @@ class Runner:
     def request_text(job: dict, job_type: JobType) -> str:
         """What the user asked for, as shown in the conversation."""
         parts = []
-        if job_type.id != "general" or not job.get("instructions"):
-            parts.append(f"{job_type.label}: {job['title']}")
+        if job_type.id != "general" or not job.get("instructions"):  # a hand-off title already starts with the label
+            parts.append(job["title"] if job["title"].startswith(job_type.label) else f"{job_type.label}: {job['title']}")
         customer = (job.get("params") or {}).get("customer")
         if customer:
             parts.append(f"ลูกค้า: {customer}")

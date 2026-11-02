@@ -321,6 +321,10 @@ label, .label { font-size: var(--fs-small); font-weight: 500; }
 .title-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); }
 .title-row h1 { font-size: var(--fs-h1); overflow-wrap: anywhere; }
 .job-head .job-meta { margin-top: var(--s1); }
+.job-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); margin-top: var(--s1); color: var(--ink-2); font-size: var(--fs-small); }
+.job-links > .icon { color: var(--ink-3); }
+.job-links .sep { margin: 0 var(--s2); color: var(--ink-3); }
+.handoff-form { margin: var(--s4) 0 0; }
 .sep { margin: 0 0.45em; color: var(--control); }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
 .confirm-text { color: var(--ink-2); font-size: var(--fs-small); }
@@ -344,6 +348,9 @@ label, .label { font-size: var(--fs-small); font-weight: 500; }
 .msg.claude .bubble { max-width: 100%; }
 .msg-files { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); margin: var(--s2) 0 0; padding: 0; list-style: none; color: var(--ink-2); font-size: var(--fs-small); }
 .msg-files li { display: inline-flex; align-items: center; gap: var(--s1); }
+.msg-photos { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s2); }
+.msg-photos a { display: block; border-radius: var(--r-sm); overflow: hidden; line-height: 0; }
+.msg-photos img { width: 96px; height: 72px; object-fit: cover; background: var(--sunken); }
 .doc-inline > :first-child { margin-top: 0; }
 .doc-inline p + p, .doc-inline ul, .doc-inline ol { margin-top: var(--s2); }
 .doc-inline ul, .doc-inline ol { padding-left: 1.3em; }
@@ -404,6 +411,8 @@ label, .label { font-size: var(--fs-small); font-weight: 500; }
 .doc ul, .doc ol { max-width: 70ch; margin: 0.5em 0; padding-left: 1.4em; }
 .doc li + li { margin-top: 0.2em; }
 .doc blockquote { margin: 0.8em 0; padding: var(--s3) var(--s4); border-radius: var(--r-md); background: var(--sunken); color: var(--ink-2); }
+.doc blockquote > :first-child { margin-top: 0; }
+.doc blockquote > :last-child { margin-bottom: 0; }
 .doc hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--line); }
 .table-wrap { margin: 0.8em 0; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); line-height: 1.5; }
@@ -420,7 +429,11 @@ td.num { white-space: nowrap; }
 .title-block .path code { min-width: 0; overflow-wrap: anywhere; background: none; padding: 0; color: var(--ink-2); }
 .title-block .path a { display: inline-flex; align-items: center; gap: var(--s1); white-space: nowrap; }
 /* your own edit of a result: the sheet becomes a plain text editor, same font as the document */
-.out-tools { margin-left: auto; }
+.out-tools { display: flex; flex-wrap: wrap; gap: var(--s1); margin-left: auto; }
+/* copy one drafted message: the button sits in the quote's corner */
+.doc .has-copy { position: relative; padding-right: 48px; }
+.copy-btn { position: absolute; top: var(--s1); right: var(--s1); }
+.copy-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; }
 .out-tools:empty { display: none; }
 .editor-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2) var(--s3); padding: var(--s2) var(--s3) var(--s2) var(--s4); border-bottom: 1px solid var(--line); background: var(--sunken); }
 .editor-note { display: flex; align-items: center; gap: var(--s2); min-width: 0; margin: 0; color: var(--ink-2); font-size: var(--fs-small); }

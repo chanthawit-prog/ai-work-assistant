@@ -16,7 +16,34 @@ const STATUS = {
   failed: ["ไม่สำเร็จ", "failed"],
   cancelled: ["ยกเลิกแล้ว", "cancelled"],
 };
-const SOURCES = { dashboard: "สั่งจากหน้าเว็บ", inbox: "จากโฟลเดอร์ inbox", schedule: "งานประจำ" };
+const SOURCES = { dashboard: "สั่งจากหน้าเว็บ", inbox: "จากโฟลเดอร์ inbox", schedule: "งานประจำ", handoff: "ต่อจากงานอื่น" };
+/* next steps offered under ทำงานต่อ, by the type of the job you continue from */
+const HANDOFF_PRESETS = {
+  "meeting-summary": [
+    { type: "proposal-draft", label: "ร่างใบเสนอราคาจากประชุมนี้", instructions: "ร่างใบเสนอราคาตามสิ่งที่ตกลงในประชุมนี้ ใช้ราคาจาก price list ในคลังความรู้ และระบุสิ่งที่ยังต้องยืนยันกับลูกค้า" },
+    { type: "general", label: "ร่างอีเมลสรุปประชุมถึงลูกค้า", instructions: "ร่างอีเมลสรุปประชุมถึงลูกค้า สุภาพ กระชับ บอกสิ่งที่ตกลง สิ่งที่แต่ละฝ่ายต้องทำ และกำหนดการ" },
+    { type: "sales-brief", label: "เตรียมพบลูกค้าครั้งถัดไป", instructions: "เตรียมข้อมูลสำหรับการพบลูกค้าครั้งถัดไป จากประเด็นที่ยังค้างในประชุมนี้" },
+  ],
+  "eng-qa": [
+    { type: "proposal-draft", label: "ร่างใบเสนอราคาตามสเปกนี้", instructions: "ร่างใบเสนอราคาตามสเปกและขนาดอุปกรณ์ที่สรุปไว้ในคำตอบนี้ ใช้ราคาจาก price list ในคลังความรู้" },
+    { type: "general", label: "สรุปเป็นข้อความตอบลูกค้า", instructions: "สรุปคำตอบนี้เป็นข้อความตอบลูกค้า ภาษาที่คนที่ไม่ใช่วิศวกรเข้าใจ บอกผลสรุปและเหตุผลสั้น ๆ" },
+  ],
+  "proposal-draft": [
+    { type: "general", label: "ร่างอีเมลส่งใบเสนอราคา", instructions: "ร่างอีเมลส่งใบเสนอราคานี้ถึงลูกค้า สรุปขอบเขตงาน ยอดรวม และเงื่อนไขสำคัญ" },
+    { type: "eng-qa", label: "ตรวจสเปกทางวิศวกรรม", instructions: "ตรวจสเปกทางวิศวกรรมในใบเสนอราคานี้ เช่น ขนาดสาย breaker แรงดันตก แล้วชี้จุดที่ควรแก้พร้อมเหตุผล" },
+  ],
+  "sales-brief": [
+    { type: "general", label: "ร่างข้อความนัดพบลูกค้า", instructions: "ร่างข้อความนัดพบลูกค้า พร้อมวาระการคุยจากข้อมูลนี้" },
+    { type: "proposal-draft", label: "ร่างใบเสนอราคาเบื้องต้น", instructions: "ร่างใบเสนอราคาเบื้องต้นจากความต้องการของลูกค้าในข้อมูลนี้" },
+  ],
+  "follow-up": [
+    { type: "general", label: "แยกข้อความติดตามรายคน", instructions: "แยกข้อความติดตามเป็นรายผู้รับผิดชอบ ฉบับละคน พร้อมคัดลอกไปส่งทาง LINE" },
+  ],
+  general: [
+    { type: "general", label: "ทำต่อจากผลนี้", instructions: "" },
+    { type: "proposal-draft", label: "ร่างใบเสนอราคาจากผลนี้", instructions: "" },
+  ],
+};
 const PRIORITY = { high: "สูง", medium: "กลาง", low: "ต่ำ" };
 const DAYS = { mon: "จ.", tue: "อ.", wed: "พ.", thu: "พฤ.", fri: "ศ.", sat: "ส.", sun: "อา." };
 const QUOTA_WINDOWS = { five_hour: "รอบ 5 ชม.", seven_day: "รายสัปดาห์", seven_day_opus: "รายสัปดาห์ (Opus)", seven_day_sonnet: "รายสัปดาห์ (Sonnet)" };
@@ -74,10 +101,87 @@ function tooBig(list) {
   toast(`ไฟล์รวม ${fmtMB(total)} เกินที่ตั้งไว้ ${limit} MB ต่อครั้ง (MAX_UPLOAD_MB)`, "bad");
   return true;
 }
+/* The dashboard usually runs on plain http:// in the office LAN, where browsers switch the clipboard API off,
+   so copy through a hidden text box there (the way clipboard libraries do, iOS included). */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) { /* fall through to the text box */ }
+  }
+  const box = document.createElement("textarea");
+  box.value = text;
+  box.setAttribute("readonly", "");
+  box.style.cssText = `position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px`; // 16px: no iOS zoom
+  document.body.appendChild(box);
+  box.removeAttribute("readonly");
+  box.select();
+  box.setSelectionRange(0, text.length);
+  box.setAttribute("readonly", "");
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch (err) {
+    ok = false;
+  }
+  box.remove();
+  return ok;
+}
+async function copyWithToast(text, what = "ข้อความ") {
+  if (await copyText(text)) toast(`คัดลอก${what}แล้ว วางในอีเมลหรือ LINE ได้เลย`);
+  else toast("เบราว์เซอร์นี้คัดลอกให้ไม่ได้ กดค้างที่ข้อความเพื่อคัดลอกเอง", "bad");
+}
+/* A rendered document as text to paste into an email or LINE: no Markdown signs, bullets and numbers kept,
+   table rows as tab-separated lines (they paste into Excel as cells). */
+function plainText(container) {
+  const lines = [];
+  const block = (el) => {
+    const tag = el.tagName;
+    if (tag === "BUTTON") return; // the copy buttons themselves
+    if (tag === "UL" || tag === "OL") {
+      [...el.children].forEach((li, i) => lines.push(`${tag === "OL" ? `${i + 1}.` : "•"} ${li.textContent.trim()}`));
+    } else if (tag === "BLOCKQUOTE") {
+      [...el.children].forEach(block);
+      return;
+    } else if (tag === "TABLE" || el.classList.contains("table-wrap")) {
+      $$("tr", el).forEach((tr) => lines.push([...tr.children].map((c) => c.textContent.trim()).join("\t")));
+    } else if (tag === "PRE") {
+      lines.push(el.textContent.replace(/\n+$/, ""));
+    } else if (tag === "HR") {
+      lines.push("—");
+    } else {
+      lines.push(el.textContent.trim());
+    }
+    lines.push("");
+  };
+  [...container.children].forEach(block);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/* a copy button on every quoted block (drafted messages) and code block of a rendered document */
+function addCopyButtons(root) {
+  $$("blockquote, pre", root).forEach((block) => {
+    if (block.parentElement.closest("blockquote, pre")) return; // one button per message, not per nested quote
+    const text = block.tagName === "PRE" ? block.textContent.replace(/\n+$/, "") : plainText(block);
+    if (!text) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "icon-btn copy-btn";
+    b.setAttribute("aria-label", "คัดลอกข้อความนี้");
+    b.title = "คัดลอกข้อความนี้";
+    b.innerHTML = icon("copy");
+    b.addEventListener("click", () => copyWithToast(text));
+    block.classList.add("has-copy");
+    block.appendChild(b);
+  });
+}
+
 function badge(status) {
   const [label, cls] = STATUS[status] || [status, "queued"];
   return `<span class="badge s-${cls}">${esc(label)}</span>`;
 }
+const IMAGE_RE = /\.(png|jpe?g|gif|webp)$/i;
 const fileUrl = (jobId, area, path, raw = false) =>
   `/api/jobs/${encodeURIComponent(jobId)}/files/${area}/${path.split("/").map(encodeURIComponent).join("/")}${raw ? "?raw=1" : ""}`;
 
@@ -140,6 +244,7 @@ function renderMarkdown(md) {
   let code = [];
   let list = null;
   let table = [];
+  let quote = [];
   const inline = (s) =>
     esc(s)
       .replace(/`([^`]+)`/g, "<code>$1</code>")
@@ -161,6 +266,12 @@ function renderMarkdown(md) {
       .join("")}</table></div>`;
     table = [];
   };
+  /* consecutive "> " lines are one quote (a drafted email keeps its paragraphs, lists and one copy button) */
+  const flushQuote = () => {
+    if (!quote.length) return;
+    html += `<blockquote>${renderMarkdown(quote.join("\n"))}</blockquote>`;
+    quote = [];
+  };
   for (const line of lines) {
     if (line.trim().startsWith("```")) {
       if (inCode) {
@@ -178,6 +289,14 @@ function renderMarkdown(md) {
       code.push(line);
       continue;
     }
+    const q = !inCode && line.match(/^\s*>\s?(.*)$/);
+    if (q) {
+      flushList();
+      flushTable();
+      quote.push(q[1]);
+      continue;
+    }
+    flushQuote();
     if (/^\s*\|.*\|\s*$/.test(line)) {
       flushList();
       table.push(line);
@@ -203,9 +322,6 @@ function renderMarkdown(md) {
         list = "ol";
       }
       html += `<li>${inline(m[1])}</li>`;
-    } else if ((m = line.match(/^\s*>\s?(.*)$/))) {
-      flushList();
-      html += `<blockquote>${inline(m[1])}</blockquote>`;
     } else if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
       flushList();
       html += "<hr>";
@@ -217,6 +333,7 @@ function renderMarkdown(md) {
     }
   }
   if (inCode) html += `<pre><code>${esc(code.join("\n"))}</code></pre>`;
+  flushQuote();
   flushList();
   flushTable();
   return html;
@@ -525,6 +642,7 @@ function showJob(id) {
   $("#view").innerHTML = `
     <a class="back" href="#/">${icon("chevron-left")}งานทั้งหมด</a>
     <header class="job-head" id="jobHead" aria-busy="true">${skeletonRows(1)}</header>
+    <div id="handoff"></div>
     <div class="job-grid">
       <section class="convo" aria-label="บทสนทนากับ Claude">
         <ol class="thread" id="thread"></ol>
@@ -651,6 +769,7 @@ function showJob(id) {
   const refresh = poll(async () => {
     const data = await api(`/api/jobs/${encodeURIComponent(id)}?after=${after}`);
     job = data.job;
+    jobPage.handoff = data.handoff;
     const running = job.status === "running" || job.status === "queued";
 
     const sig = `${job.status}|${job.updated_at}`;
@@ -673,6 +792,8 @@ function showJob(id) {
     const order = ((data.type && data.type.outputs) || []).map((o) => o.replace(/^output\//, ""));
     const rank = (p) => (order.includes(p) ? order.indexOf(p) : 99);
     outputs = data.files.output.slice().sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
+    jobPage.outputs = outputs;
+    jobPage.inputs = data.files.input.map((f) => f.path);
     const fsig = JSON.stringify(data.files);
     if (fsig !== filesSig || changed) {
       if (outputs.length) selectOutput(outputs.some((f) => f.path === selected) ? selected : outputs[0].path);
@@ -691,8 +812,12 @@ function renderThread(steps, job, openGroups, autoscroll = false) {
   steps.forEach((st, i) => {
     if (st.kind === "user") {
       group = null;
+      const files = st.files || [];
+      const photos = files.filter((f) => IMAGE_RE.test(f)).slice(0, 6);
       items.push(`<li class="msg user"><div class="bubble">${esc(st.text).replace(/\n/g, "<br>")}${
-        st.files && st.files.length ? `<ul class="msg-files">${st.files.map((f) => `<li>${icon("file")}${esc(f)}</li>`).join("")}</ul>` : ""}</div>
+        photos.length ? `<div class="msg-photos">${photos.map((f) => `<a href="${fileUrl(job.id, "input", f, true)}" target="_blank" rel="noopener">
+          <img src="${fileUrl(job.id, "input", f, true)}" alt="${esc(f)}" loading="lazy" width="96" height="72"></a>`).join("")}</div>` : ""}${
+        files.length ? `<ul class="msg-files">${files.map((f) => `<li>${icon("file")}${esc(f)}</li>`).join("")}</ul>` : ""}</div>
         <span class="msg-time">${esc(fmtClock(st.t))}</span></li>`);
     } else if (st.kind === "text") {
       group = null;
@@ -790,7 +915,7 @@ function renderJobHead(job) {
   const meta = [
     job.type_label,
     `สร้าง ${fmtTime(job.created_at)}`,
-    job.source !== "dashboard" ? SOURCES[job.source] || job.source : "",
+    job.source !== "dashboard" && !job.origin ? SOURCES[job.source] || job.source : "", // a hand-off links its origin below
     job.params && job.params.customer ? `ลูกค้า ${job.params.customer}` : "",
     runs.length > 1 ? `${runs.length} รอบ` : "",
     last.model || "",
@@ -798,7 +923,13 @@ function renderJobHead(job) {
     last.started_at && last.ended_at ? `ใช้เวลา ${fmtDuration(last.started_at, last.ended_at)}` : "",
   ].filter(Boolean).map(esc).join('<span class="sep">·</span>');
 
+  const jobLink = (j) => (j.status ? `<a href="#/job/${encodeURIComponent(j.id)}">${esc(j.title)}</a> ${badge(j.status)}` : `${esc(j.title)} <span class="muted">(ลบแล้ว)</span>`);
+  const links = [];
+  if (job.origin) links.push(`<span>ต่อจาก ${jobLink(job.origin)}</span>`);
+  if (job.handoffs && job.handoffs.length) links.push(`<span>งานต่อเนื่อง ${job.handoffs.map(jobLink).join('<span class="sep">·</span>')}</span>`);
+
   const actions = [];
+  if (job.status === "needs_review" || job.status === "done") actions.push(`<button type="button" class="btn" data-act="handoff" aria-expanded="false" aria-controls="handoff">${icon("forward")}ทำงานต่อ</button>`);
   if (job.status === "needs_review") actions.push(`<button type="button" class="btn primary" data-act="approve">${icon("check")}อนุมัติผลงาน</button>`);
   if (job.status === "failed" || job.status === "cancelled") actions.push(`<button type="button" class="btn" data-act="retry">${icon("retry")}ลองใหม่ตั้งแต่ต้น</button>`);
   if (job.status === "queued" || job.status === "running") actions.push(`<button type="button" class="btn danger" data-act="ask-cancel">${icon("x")}ยกเลิกงาน</button>`);
@@ -807,6 +938,7 @@ function renderJobHead(job) {
     <div class="job-head-main">
       <div class="title-row"><h1>${esc(job.title)}</h1>${badge(job.status)}</div>
       <p class="job-meta">${meta}</p>
+      ${links.length ? `<p class="job-links">${icon("forward")}${links.join("")}</p>` : ""}
     </div>
     <div class="actions">${actions.join("")}</div>
     ${notices.join("")}`;
@@ -825,6 +957,7 @@ function renderJobHead(job) {
     }
     if (act === "keep") return renderJobHead(job);
     if (act === "approve" && unsaved()) return toast("บันทึกหรือยกเลิกที่แก้ไว้ก่อน แล้วค่อยอนุมัติ", "bad");
+    if (act === "handoff") return openHandoff(job, btn);
     btn.disabled = true;
     try {
       if (act === "approve") {
@@ -846,6 +979,112 @@ function renderJobHead(job) {
   $$("#jobHead [data-act]").forEach((btn) => btn.addEventListener("click", onAction));
 }
 
+/* what the job page poll knows that the head's buttons need */
+const jobPage = { handoff: null, outputs: [], inputs: [] };
+
+async function openHandoff(job, btn) {
+  const holder = $("#handoff");
+  if (holder.innerHTML) { // second click closes it
+    holder.innerHTML = "";
+    btn.setAttribute("aria-expanded", "false");
+    return;
+  }
+  if (unsaved()) return toast("บันทึกที่แก้ไว้ในผลลัพธ์ก่อน งานใหม่จะได้ไฟล์ฉบับที่บันทึกแล้ว", "bad");
+  const info = jobPage.handoff;
+  if (!info) return toast("ส่งต่อได้เมื่องานนี้มีผลลัพธ์แล้ว", "bad");
+  const types = (await getJobTypes()).filter((t) => info.types.includes(t.id));
+  const presets = HANDOFF_PRESETS[job.type] || HANDOFF_PRESETS.general;
+  const files = jobPage.outputs.map((f) => f.path);
+  btn.setAttribute("aria-expanded", "true");
+  holder.innerHTML = `
+    <form class="schedule-form handoff-form" id="handoffForm" novalidate>
+      <h2>ทำงานต่อจากผลนี้</h2>
+      <p class="small muted">ระบบสร้างงานใหม่ แนบไฟล์ผลลัพธ์ที่เลือกให้ Claude อ่าน และพาไปที่งานนั้น ไม่ต้องดาวน์โหลดแล้วแนบเอง</p>
+      <div class="presets"><span class="small muted">เลือกเร็ว:</span>${presets.map((p, i) =>
+        `<button type="button" class="btn quiet" data-hpreset="${i}">${icon(TYPE_ICON[p.type] || "message")}${esc(p.label)}</button>`).join("")}</div>
+      <div class="field"><span class="label" id="hTypeLabel">ชนิดงาน</span>
+        <div class="chips" role="radiogroup" aria-labelledby="hTypeLabel">${types.map((t) => `
+          <label class="type-option"><input type="radio" name="hType" value="${esc(t.id)}"><span>${icon(TYPE_ICON[t.id] || "message")}${esc(t.label)}</span></label>`).join("")}</div></div>
+      <div class="field" id="hCustomerField" hidden><label for="hCustomer">ชื่อลูกค้า</label>
+        <input id="hCustomer" type="text" autocomplete="off" placeholder="ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/"></div>
+      <div class="field"><label for="hInstr">สิ่งที่ให้ Claude ทำ</label>
+        <textarea id="hInstr" rows="3" placeholder="เช่น ร่างอีเมลส่งใบเสนอราคานี้ถึงลูกค้า"></textarea></div>
+      <div class="field"><span class="label">ไฟล์ผลลัพธ์ที่ส่งต่อ</span>
+        ${files.map((f) => `<label class="check-option"><input type="checkbox" name="hFile" value="${esc(f)}" ${info.files.includes(f) ? "checked" : ""}> ${esc(f)}</label>`).join("")}</div>
+      ${jobPage.inputs.length ? `<div class="field"><span class="label">ไฟล์ที่แนบในงานเดิม (ถ้าอยากให้ Claude ดูต้นฉบับด้วย เช่น รูป nameplate หรือ transcript)</span>
+        ${jobPage.inputs.map((f) => `<label class="check-option"><input type="checkbox" name="hInput" value="${esc(f)}"> ${esc(f)}</label>`).join("")}</div>` : ""}
+      ${job.status === "needs_review" ? `<p class="notice warn">${icon("alert")}<span>ผลนี้ยังไม่ได้อนุมัติ งานใหม่จะได้ไฟล์ฉบับปัจจุบัน ถ้าแก้ผลนี้ภายหลัง งานใหม่จะไม่เปลี่ยนตาม</span></p>` : ""}
+      <div class="form-actions">
+        <button type="submit" class="btn primary" id="hSend">${icon("arrow-up")}ส่งให้ Claude</button>
+        <button type="button" class="btn quiet" id="hCancel">ยกเลิก</button>
+      </div>
+    </form>`;
+  const form = $("#handoffForm");
+  const customer = (job.params && job.params.customer) || "";
+  const subject = (job.params && job.params.subject) || job.title;
+  let chosen = null; // the quick choice, while its text is left as it is
+  $("#hCustomer").value = customer;
+  const syncType = () => {
+    const t = types.find((x) => x.id === form.elements.hType.value);
+    $("#hCustomerField").hidden = !(t && t.fields.some((f) => f.name === "customer"));
+  };
+  const choose = (p) => {
+    chosen = p;
+    $$("input[name=hType]", form).forEach((r) => (r.checked = r.value === p.type));
+    if (p.instructions || !$("#hInstr").value.trim()) $("#hInstr").value = p.instructions;
+    syncType();
+  };
+  $$("input[name=hType]", form).forEach((r) => r.addEventListener("change", syncType));
+  $$("[data-hpreset]", form).forEach((b) => b.addEventListener("click", () => {
+    choose(presets[Number(b.dataset.hpreset)]);
+    $("#hInstr").focus();
+  }));
+  choose(presets[0]);
+  $("#hCancel").onclick = () => {
+    holder.innerHTML = "";
+    btn.setAttribute("aria-expanded", "false");
+  };
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const type = types.find((x) => x.id === form.elements.hType.value);
+    const instructions = $("#hInstr").value.trim();
+    const picked = $$("input[name=hFile]:checked", form).map((c) => c.value);
+    const originals = $$("input[name=hInput]:checked", form).map((c) => c.value);
+    const needs = (name) => type && type.fields.some((f) => f.name === name && f.required);
+    if (!picked.length) return toast("เลือกไฟล์ที่จะส่งต่ออย่างน้อย 1 ไฟล์", "bad");
+    if (needs("instructions") && !instructions) {
+      toast("บอก Claude ว่าจะให้ทำอะไรกับไฟล์นี้", "bad");
+      return $("#hInstr").focus();
+    }
+    if (needs("customer") && !$("#hCustomer").value.trim()) {
+      toast("กรอกชื่อลูกค้าก่อน", "bad");
+      return $("#hCustomer").focus();
+    }
+    /* "what this step does · what the work is about": the quick choice's name, or the start of what you typed */
+    const firstLine = instructions.split("\n")[0].trim();
+    const space = firstLine.lastIndexOf(" ", 50); // Thai has no spaces between words: cut at a phrase break if there is one
+    const short = firstLine.length > 50 ? `${firstLine.slice(0, space > 25 ? space : 50)}…` : firstLine;
+    const step = chosen && chosen.type === type.id && chosen.instructions && instructions === chosen.instructions.trim()
+      ? chosen.label : short || type.label;
+    const send = $("#hSend");
+    send.disabled = true;
+    send.classList.add("busy");
+    try {
+      const created = await postJSON(`/api/jobs/${encodeURIComponent(job.id)}/handoff`, {
+        type: type.id, title: `${step} · ${subject}`, instructions, customer: $("#hCustomer").value.trim(),
+        files: picked, inputs: originals });
+      toast("สร้างงานต่อแล้ว Claude จะเริ่มเมื่อถึงคิว");
+      location.hash = `#/job/${encodeURIComponent(created.id)}`;
+    } catch (err) {
+      toast(err.message, "bad");
+      send.disabled = false;
+      send.classList.remove("busy");
+    }
+  });
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  holder.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+}
+
 function actionItemsTable(items) {
   if (!Array.isArray(items)) return null;
   if (!items.length) return `<p class="muted">ไม่มี action item</p>`;
@@ -865,8 +1104,14 @@ async function loadOutput(jobId, file, job, onEdit) {
     if (editing) return; // opened while this file was loading
     const canEdit = Boolean(f.editable && onEdit && job && job.status === "needs_review");
     if (tools) {
-      tools.innerHTML = canEdit ? `<button type="button" class="btn" id="editOut">${icon("pencil")}แก้ไขเอง</button>` : "";
+      tools.innerHTML = (f.binary ? "" : `<button type="button" class="btn quiet" id="copyOut">${icon("copy")}คัดลอก</button>`)
+        + (canEdit ? `<button type="button" class="btn" id="editOut">${icon("pencil")}แก้ไขเอง</button>` : "");
       if (canEdit) $("#editOut").onclick = () => onEdit(file, f);
+      const copy = $("#copyOut");
+      if (copy) copy.onclick = () => {
+        const doc = $("#outView article.doc");
+        copyWithToast(doc && ext === "md" ? plainText(doc) : f.text, "ทั้งเอกสาร");
+      };
     }
     // the title block: what an engineer reads first on any drawing sheet
     const block = `<dl class="title-block">
@@ -893,6 +1138,7 @@ async function loadOutput(jobId, file, job, onEdit) {
         || `<pre>${esc(parsed !== null ? JSON.stringify(parsed, null, 2) : f.text)}</pre>`;
     } else html = `<pre>${esc(f.text)}</pre>`;
     view.innerHTML = `<article class="doc">${html}</article>${block}`;
+    if (ext === "md") addCopyButtons($("#outView article.doc"));
   } catch (err) {
     if (tools) tools.innerHTML = "";
     view.innerHTML = `<div class="doc"><p class="muted">เปิดไฟล์ไม่ได้: ${esc(err.message)}</p></div>`;
@@ -1232,13 +1478,9 @@ function renderCalendar(cal) {
     </section>`;
   const copy = $("#calCopy");
   if (copy) copy.onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(url);
-      toast("คัดลอกลิงก์แล้ว");
-    } catch (err) { /* http:// pages may not get the clipboard: select the text instead */
-      getSelection().selectAllChildren($("#calUrl"));
-      toast("เลือกลิงก์ไว้แล้ว กดคัดลอก (Ctrl + C) ได้เลย");
-    }
+    if (await copyText(url)) return toast("คัดลอกลิงก์แล้ว");
+    getSelection().selectAllChildren($("#calUrl")); // last resort: select it for Ctrl + C
+    toast("เลือกลิงก์ไว้แล้ว กดคัดลอก (Ctrl + C) ได้เลย");
   };
   $$("[data-cal]", panel).forEach((b) => b.addEventListener("click", async () => {
     const act = b.dataset.cal;

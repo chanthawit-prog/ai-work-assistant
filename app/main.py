@@ -26,6 +26,7 @@ from .claude_status import check_claude
 from .config import Settings
 from .convert import READABLE_EXTS, prepare_inputs
 from .export_docx import action_items_markdown, markdown_to_docx
+from .handoff import HANDOFF_TYPES, default_files, handoff
 from .jobtypes import JOB_TYPES
 from .knowledge import KnowledgeIndex, kb_search
 from .notify import Notifier
@@ -38,7 +39,7 @@ from .store import AREAS, JOB_ID_RE, JobStore, now_iso, read_json, revision
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
@@ -82,6 +83,15 @@ class TaskIn(BaseModel):
     due: str | None = None
     priority: str = "medium"
     notes: str = ""
+
+
+class HandoffIn(BaseModel):
+    type: str
+    instructions: str = ""
+    title: str = ""
+    customer: str | None = None  # None: the customer of the job you continue from
+    files: list[str] = []        # output files to pass on; empty: the job type's main outputs
+    inputs: list[str] = []       # files attached to the original job to pass on as well (a photo, the transcript)
 
 
 class EditIn(BaseModel):
@@ -242,6 +252,15 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     async def _conflict(_request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
+    def linked(job_id: str | None, fallback_title: str = "") -> dict:
+        """A job this one continues from, or continues into: its current title and status (None if deleted)."""
+        other = store.get(job_id) if job_id else None
+        if other is None:
+            return {"id": job_id, "title": fallback_title or job_id, "status": None, "type_label": ""}
+        other_type = JOB_TYPES.get(other["type"])
+        return {"id": other["id"], "title": other["title"], "status": other["status"],
+                "type_label": other_type.label if other_type else other["type"]}
+
     def job_view(job: dict, full: bool = True) -> dict:
         """`full=False` is the slim version the job list polls every few seconds."""
         job_type = JOB_TYPES.get(job["type"])
@@ -261,6 +280,9 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         }
         if full:
             view.update({k: job.get(k) for k in ("session_id", "instructions", "review")})
+            params = job.get("params") or {}
+            view.update(origin=linked(params["from_job"], params.get("from_title", "")) if params.get("from_job") else None,
+                        handoffs=[linked(h.get("job_id")) for h in job.get("handoffs") or []])
             view.update(warnings=job.get("warnings") or [], runs=runs, edits=job.get("edits") or [],
                         can_message=job.get("status") in MESSAGE_STATUSES)
         return view
@@ -348,9 +370,11 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             raise KeyError(job_id)
         steps, total = store.read_steps(job_id, after=max(0, after))
         job_type = JOB_TYPES.get(job["type"])
+        can_handoff = job.get("status") in ("needs_review", "done")
         return {
             "job": job_view(job),
             "type": job_type.to_dict() if job_type else None,
+            "handoff": {"types": list(HANDOFF_TYPES), "files": default_files(store, job)} if can_handoff else None,
             "steps": steps,
             "next": total,
             "partial_text": runner.partial.get(job_id),
@@ -378,6 +402,12 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             raise HTTPException(413, f"ข้อความยาวเกิน {MAX_TEXT_BYTES // MB} MB")
         job, changed = await asyncio.to_thread(save_edit, store, job_id, rel, body.text, body.base_sha)
         return {"job": job_view(job), "changed": changed}
+
+    @app.post("/api/jobs/{job_id}/handoff")
+    async def handoff_job(job_id: str, body: HandoffIn):
+        """Start the next job from this result (no await inside: the worker must not see the new job half-made)."""
+        job = handoff(store, job_id, body.type, body.instructions, body.title, body.customer, body.files, body.inputs)
+        return job_view(job)
 
     @app.post("/api/jobs/{job_id}/approve")
     async def approve_job(job_id: str, body: NoteIn):

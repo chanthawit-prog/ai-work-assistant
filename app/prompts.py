@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import Settings
-from .jobtypes import JobType
+from .jobtypes import JOB_TYPES, JobType
 
 BUNDLED_DIR = Path(__file__).parent / "prompts"
 # what the files the app puts in context/ are, so Claude does not have to guess
@@ -81,6 +81,16 @@ def task_message(job: dict, job_type: JobType, settings: Settings, inputs: list[
     customer = params.get("customer")
     if customer:
         lines.append(f"ลูกค้า: {customer}")
+    if params.get("from_job"):
+        source_type = JOB_TYPES.get(params.get("from_type", ""))
+        state = ("ผู้ใช้อนุมัติแล้ว" if params.get("from_approved")
+                 else "ผู้ใช้ยังไม่ได้อนุมัติ ให้ตรวจทานตัวเลขและข้อเท็จจริงก่อนนำมาใช้")
+        lines.append(f"ต่อจากงาน: \"{params.get('from_title', '')}\"" + (f" ({source_type.label})" if source_type else "")
+                     + f" ผลงานของงานนั้น{state}")
+        if params.get("from_files"):
+            lines.append("ไฟล์ผลงานที่ส่งต่อมา: " + ", ".join(f"input/{f}" for f in params["from_files"]))
+        if params.get("from_inputs"):
+            lines.append("ไฟล์ต้นฉบับที่แนบในงานนั้น: " + ", ".join(f"input/{f}" for f in params["from_inputs"]))
     lines += ["", "ไฟล์ input:"] + ([f"- input/{f}" for f in inputs] or ["- (ไม่มี)"])
     if context:
         lines += ["", "ข้อมูลประกอบที่ระบบเตรียมไว้:"] + [f"- context/{f}" for f in context]

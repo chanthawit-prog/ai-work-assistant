@@ -239,6 +239,12 @@ class JobStore:
             shutil.move(str(source), target)
         return target.name
 
+    def copy_file(self, job_id: str, area: str, filename: str, source: Path) -> str:
+        """Copy a file that must stay where it is (another job's output) into this job."""
+        target = self._new_path(job_id, area, filename)
+        shutil.copy2(source, target)
+        return target.name
+
     def list_files(self, job_id: str, area: str) -> list[dict]:
         base = self.area_dir(job_id, area)
         if not base.exists():
