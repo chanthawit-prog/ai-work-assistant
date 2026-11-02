@@ -23,6 +23,11 @@ NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 PKG_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
 MAX_ROWS = 100_000          # per sheet: enough for any price list, a guard against runaway files
+# uncompressed size limits of the XML parts: a zip bomb (a few KB that unpack to GBs) must not fill the NAS's RAM
+MB = 1024 * 1024
+LIMITS = {"xl/sharedStrings.xml": 128 * MB, "xl/styles.xml": 32 * MB, "xl/workbook.xml": 16 * MB,
+          "xl/_rels/workbook.xml.rels": 16 * MB}
+MAX_SHEET_XML = 256 * MB
 # Excel's built-in number formats that show dates or times (ECMA-376 18.8.30), including the East Asian ids
 # and the Thai ones (71-81: ว/ด/ปปปป, ช:นน ...), which Thai Excel uses without writing the format code
 BUILTIN_DATE = set(range(14, 18)) | {22} | set(range(27, 37)) | set(range(50, 59)) | {71, 72, 73, 74, 77, 81}
@@ -33,6 +38,14 @@ _FORMAT_NOISE = re.compile(r'"[^"]*"|\\.|\[[^\]]*\]|am/pm|a/p|general', re.IGNOR
 
 class XlsxError(ValueError):
     """The file is not a readable .xlsx workbook."""
+
+
+def _open(zf: zipfile.ZipFile, name: str, limit: int | None = None):
+    """Open a part of the workbook, refusing one that unpacks to more than its limit."""
+    size = zf.getinfo(name).file_size
+    if size > (limit or LIMITS.get(name, MAX_SHEET_XML)):
+        raise XlsxError(f"{name} ใหญ่ผิดปกติ ({size // MB:,} MB เมื่อแตกไฟล์)")
+    return zf.open(name)
 
 
 def _column(ref: str) -> int:
@@ -49,7 +62,7 @@ def _shared_strings(zf: zipfile.ZipFile) -> list[str]:
     if "xl/sharedStrings.xml" not in zf.namelist():
         return []
     out = []
-    for _event, el in ET.iterparse(zf.open("xl/sharedStrings.xml"), events=("end",)):
+    for _event, el in ET.iterparse(_open(zf, "xl/sharedStrings.xml"), events=("end",)):
         if el.tag == NS + "si":
             parts = []
             for child in el:  # plain <t>, or rich-text runs <r><t>; skip phonetic guides <rPh>
@@ -66,7 +79,7 @@ def _date_styles(zf: zipfile.ZipFile) -> dict[int, str]:
     """{cell style index: "date" or "time"} for the styles whose number format shows one."""
     if "xl/styles.xml" not in zf.namelist():
         return {}
-    root = ET.parse(zf.open("xl/styles.xml")).getroot()
+    root = ET.parse(_open(zf, "xl/styles.xml")).getroot()
     custom = {int(n.get("numFmtId", "-1")): n.get("formatCode", "") for n in root.iter(NS + "numFmt")}
     xfs = root.find(NS + "cellXfs")
     kinds = {}
@@ -95,8 +108,8 @@ def _is_date_format(code: str) -> bool:
 
 
 def _sheets(zf: zipfile.ZipFile) -> tuple[list[tuple[str, str, bool]], bool]:
-    workbook = ET.parse(zf.open("xl/workbook.xml")).getroot()
-    rels = ET.parse(zf.open("xl/_rels/workbook.xml.rels")).getroot()
+    workbook = ET.parse(_open(zf, "xl/workbook.xml")).getroot()
+    rels = ET.parse(_open(zf, "xl/_rels/workbook.xml.rels")).getroot()
     targets = {r.get("Id"): r.get("Target", "") for r in rels.iter(PKG_REL)}
     props = workbook.find(NS + "workbookPr")
     date1904 = props is not None and props.get("date1904") in ("1", "true")
@@ -133,7 +146,7 @@ def _number(text: str, kind: str | None, date1904: bool) -> str:
 def _rows(zf: zipfile.ZipFile, path: str, strings: list[str], dates: dict[int, str], date1904: bool, max_rows: int):
     """(row number, [cell text ...]) for each non-empty row; stops after max_rows rows (then yields None)."""
     count, last = 0, 0
-    for _event, el in ET.iterparse(zf.open(path), events=("end",)):
+    for _event, el in ET.iterparse(_open(zf, path, MAX_SHEET_XML), events=("end",)):
         if el.tag != NS + "row":
             continue
         number = int(el.get("r") or last + 1)

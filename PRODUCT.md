@@ -56,6 +56,8 @@ tokens, not inverted.
 
 - Works offline on the LAN: no CDN fonts or scripts.
 - Never collects Claude credentials; the setup help only explains Anthropic's own login steps.
+- Treats every file as untrusted: Claude's python3 runs in a jail (no network, no other programs, writes only in the
+  job folder), the page loads only its own scripts (CSP), and requests from other sites are refused.
 - Word exports follow the same palette and Anuphan at PEC's report sizes (body 10 pt, tables 9 pt), with the font
   embedded so recipients without it see the same document; a company template can replace the styles.
 - Runs on a NAS with little RAM (DS925+, 6 GB, swap fills easily): one job at a time, jobs wait for free RAM, the

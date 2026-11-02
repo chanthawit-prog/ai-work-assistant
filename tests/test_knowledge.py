@@ -181,7 +181,7 @@ def test_jobs_get_the_search_command_only_when_there_is_something_to_search(part
     prompt = general[general.index("--append-system-prompt") + 1]
     assert "python3 -m kb_search" in prompt and "ใช้ได้เฉพาะคำสั่ง python3 -m kb_search" in prompt
     eng = runner.build_command(JOB_TYPES["eng-qa"])
-    assert "Bash(python3 *)" in eng[eng.index("--allowedTools") + 1]
+    assert "Bash(python3 -m *)" in eng[eng.index("--allowedTools") + 1]  # covers kb_search too
     assert "ใช้ได้เฉพาะคำสั่ง" not in eng[eng.index("--append-system-prompt") + 1]
 
     dump = tmp_path / "env.json"

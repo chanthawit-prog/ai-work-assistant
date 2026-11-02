@@ -99,8 +99,13 @@ def _read_text(path: Path) -> str:
     return raw.decode("latin-1")
 
 
+MAX_DOCX_XML = 64 * 1024 * 1024  # unpacked word/document.xml: a zip bomb must not fill the NAS's RAM
+
+
 def _docx_text(path: Path) -> str:
     with zipfile.ZipFile(path) as zf:
+        if zf.getinfo("word/document.xml").file_size > MAX_DOCX_XML:
+            raise ValueError("word/document.xml ใหญ่ผิดปกติ")
         xml = zf.read("word/document.xml").decode("utf-8", errors="replace")
     out = []
     for match in _W_T.finditer(xml):
@@ -128,8 +133,8 @@ def extract(path: Path) -> tuple[str, list[tuple[int, str]], str]:
     if ext == ".docx":
         try:
             text = _docx_text(path)
-        except (zipfile.BadZipFile, KeyError):
-            return "docx", [], "อ่านไฟล์ Word ไม่ได้"
+        except (zipfile.BadZipFile, KeyError, ValueError):
+            return "docx", [], "อ่านไฟล์ Word ไม่ได้ (เสียหาย หรือใหญ่ผิดปกติเมื่อแตกไฟล์)"
         return "docx", [(1, normalise(text))], ""
     if ext in EXCEL_EXTS:
         try:

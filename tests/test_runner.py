@@ -165,8 +165,9 @@ def test_command_uses_subscription_safely(parts, monkeypatch):
     assert "--include-partial-messages" in cmd
     assert cmd[cmd.index("--tools") + 1] == "Read,Write,Edit,Glob,Grep"
     eng = runner.build_command(JOB_TYPES["eng-qa"])
-    assert "Bash(python3 *)" in eng[eng.index("--allowedTools") + 1]
-    assert "Bash(cd *)" in eng[eng.index("--allowedTools") + 1]
+    allowed = eng[eng.index("--allowedTools") + 1].split(",")
+    assert {"Bash(python3 -c *)", "Bash(python3 -m *)", "Bash(python3 output/*)", "Bash(cd *)"} <= set(allowed)
+    assert "Bash(python3 *)" not in allowed  # `python3 -I ...` would skip the jail in tools/sitecustomize.py
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "")

@@ -4,13 +4,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+from collections import deque
 import mimetypes
 import secrets
 import shutil
 import time
 from collections import Counter
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -39,9 +40,12 @@ from .store import AREAS, JOB_ID_RE, TRASH_DAYS, JobStore, now_iso, read_json, r
 from .tasks import TaskStore
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+# files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
+# (written by Claude from someone's document, say) cannot run scripts with your login
+SANDBOXED = {"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"}
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".vtt", ".srt", ".py", ".log", ".html", ".xml", ".yaml", ".yml"}
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MB = 1024 * 1024
@@ -162,25 +166,110 @@ class UploadLimit:
 
 
 class BasicAuth(BaseHTTPMiddleware):
-    """Optional password for the dashboard (DASHBOARD_PASSWORD). Keep the NAS on your LAN/VPN anyway."""
+    """Optional password for the dashboard (DASHBOARD_PASSWORD). Keep the NAS on your LAN/VPN anyway.
+
+    After MAX_FAILURES wrong passwords from one address within LOCKOUT seconds, that address gets 429 until the
+    window has passed: guessing the password by brute force on the LAN takes forever."""
+
+    MAX_FAILURES = 10
+    LOCKOUT = 600  # seconds
 
     def __init__(self, app, user: str, password: str):
         super().__init__(app)
         self.user = user.encode()
         self.password = password.encode()
+        self.failures: dict[str, deque] = {}
+
+    def locked(self, client: str, now: float) -> bool:
+        recent = self.failures.get(client)
+        while recent and now - recent[0] > self.LOCKOUT:
+            recent.popleft()
+        return bool(recent) and len(recent) >= self.MAX_FAILURES
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path in PUBLIC_PATHS or request.url.path.startswith(CALENDAR_PREFIX):
             return await call_next(request)
         header = request.headers.get("authorization", "")
+        client, now = (request.client.host if request.client else "?"), time.monotonic()
         if header.startswith("Basic "):
+            if self.locked(client, now):
+                return JSONResponse({"detail": "ใส่รหัสผ่านผิดหลายครั้ง รอ 10 นาทีแล้วลองใหม่"}, status_code=429,
+                                    headers={"Retry-After": str(self.LOCKOUT)})
             try:
                 user, _, password = base64.b64decode(header[6:]).partition(b":")
             except ValueError:
                 user = password = b""
             if secrets.compare_digest(user, self.user) and secrets.compare_digest(password, self.password):
                 return await call_next(request)
+            self.failures.setdefault(client, deque()).append(now)
+            if len(self.failures) > 1000:  # a flood of addresses: forget the oldest
+                self.failures.pop(next(iter(self.failures)))
         return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="AI Work Assistant", charset="UTF-8"'})
+
+
+# the dashboard's own page may only load its own files; nothing may frame it
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+       "font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; "
+       "form-action 'self'; frame-ancestors 'none'")
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _netloc(value: str) -> str:
+    """"https://NAS.local:443" or "nas.local:443" -> "nas.local" (default ports dropped, lower case)."""
+    host = urlsplit(value if "//" in value else f"//{value}").netloc.lower()
+    for port in (":80", ":443"):
+        if host.endswith(port):
+            return host[: -len(port)]
+    return host
+
+
+class Guard:
+    """Two defences around every request:
+    - cross-site requests: a page on another site cannot make your browser create, change or delete anything here
+      (browsers send the dashboard password with them). The browser's Sec-Fetch-Site and Origin headers decide;
+      scripts and curl, which send neither, are not affected.
+    - security headers on every response, and a Content-Security-Policy on the page itself."""
+
+    def __init__(self, app, dashboard_url: str = ""):
+        self.app = app
+        self.extra = {_netloc(dashboard_url)} if dashboard_url else set()
+
+    def allowed(self, headers: dict) -> bool:
+        site = headers.get(b"sec-fetch-site", b"").decode("latin-1")
+        if site in ("same-origin", "none"):
+            return True
+        origin = headers.get(b"origin", b"").decode("latin-1")
+        if origin and origin != "null":
+            hosts = {_netloc(headers.get(b"host", b"").decode("latin-1"))} | self.extra
+            forwarded = headers.get(b"x-forwarded-host", b"").decode("latin-1").split(",")[0].strip()
+            if forwarded:
+                hosts.add(_netloc(forwarded))
+            return _netloc(origin) in hosts
+        return not site and not origin  # no browser headers at all: a script
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope["method"] in UNSAFE_METHODS and not self.allowed(dict(scope["headers"])):
+            await JSONResponse({"detail": "ปฏิเสธคำขอที่มาจากเว็บไซต์อื่น"}, status_code=403)(scope, receive, send)
+            return
+
+        async def with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                names = {k.lower() for k, _v in headers}
+                for name, value in ((b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"same-origin"),
+                                    (b"x-frame-options", b"DENY")):
+                    if name not in names:
+                        headers.append((name, value))
+                kind = dict(headers).get(b"content-type", b"")
+                if kind.startswith(b"text/html") and b"content-security-policy" not in names:
+                    headers.append((b"content-security-policy", CSP.encode()))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, with_headers)
 
 
 def create_app(settings: Settings | None = None, start_background: bool = True) -> FastAPI:
@@ -266,6 +355,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     if settings.dashboard_password:
         app.add_middleware(BasicAuth, user=settings.dashboard_user, password=settings.dashboard_password)
     app.add_middleware(UploadLimit, max_bytes=max_upload, message=too_large)
+    app.add_middleware(Guard, dashboard_url=settings.dashboard_url)  # outermost: runs before the password check
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.exception_handler(KeyError)
@@ -416,7 +506,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         if raw or path.suffix.lower() not in TEXT_EXTS or size > MAX_TEXT_BYTES:
             if not raw:
                 return {"path": rel, "size": size, "binary": True}
-            return FileResponse(path, filename=path.name)
+            return FileResponse(path, filename=path.name, headers=SANDBOXED)
         data = path.read_bytes()
         return {"path": rel, "size": size, "sha": file_sha(data), "text": data.decode("utf-8", errors="replace"),
                 "editable": area == "output" and path.suffix.lower() in EDITABLE_EXTS}
@@ -514,6 +604,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         jobs_dir = settings.jobs_dir
         return {
             "version": {"app": APP_VERSION, "claude": (state.get("claude") or {}).get("version")},
+            "security": {"password": bool(settings.dashboard_password), "python_jail": True,
+                         "calendar_link": bool(state.get("calendar_token"))},
             "claude": state.get("claude"),
             "quota": state.get("quota"),
             "worker": {"active": list(runner.active), "max": settings.max_concurrent_jobs,
@@ -629,7 +721,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         path = (base / sub).resolve()
         if base not in path.parents or not path.is_file():
             raise KeyError(rel)
-        return FileResponse(path, filename=path.name)
+        return FileResponse(path, filename=path.name, headers=SANDBOXED)
 
     # -- follow-up list --------------------------------------------------------
     @app.get("/api/tasks")

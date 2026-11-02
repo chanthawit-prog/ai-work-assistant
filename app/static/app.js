@@ -474,7 +474,7 @@ async function showHome() {
         <p class="type-desc" id="typeDesc"></p>
         <div class="customer" id="customerField" hidden>
           <label for="cCustomer" id="cCustomerLabel">ชื่อลูกค้า</label>
-          <input id="cCustomer" type="text" autocomplete="off" list="customerNames" placeholder="เช่น ACME (ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/)" oninput="this.removeAttribute('aria-invalid')">
+          <input id="cCustomer" type="text" autocomplete="off" list="customerNames" placeholder="เช่น ACME (ตรงกับชื่อโฟลเดอร์ใน knowledge/customers/)">
         </div>
         <textarea id="cMessage" rows="3" aria-labelledby="composeTitle"></textarea>
         <ul class="attachments" id="cFiles"></ul>
@@ -503,6 +503,7 @@ async function showHome() {
   const message = $("#cMessage");
   const files = [];
   autoGrow(message);
+  $("#cCustomer").addEventListener("input", (e) => e.target.removeAttribute("aria-invalid"));
   const currentType = () => types.find((t) => t.id === form.elements.type.value);
   const renderFiles = () => {
     $("#cFiles").innerHTML = files.map((f, i) => `<li>${icon("file")}<span>${esc(f.name)}</span>
@@ -2023,14 +2024,26 @@ async function showSystem() {
   const resetText = (t) => (t ? fmtTime(new Date((t > 1e12 ? t : t * 1000)).toISOString()) : "");
   const row = (k, v) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
   $("#sysBody").removeAttribute("aria-busy");
+  const sec = s.security || {};
   $("#sysBody").innerHTML = `
+    ${sec.password === false ? `<p class="notice warn">${icon("alert")}<span><b>ยังไม่ได้ตั้งรหัสผ่าน dashboard</b> ใครที่อยู่ในวง LAN เดียวกัน
+      เปิดหน้านี้ อ่านงาน และสั่งงาน Claude ด้วย subscription ของคุณได้ ตั้ง <code>DASHBOARD_PASSWORD</code> ในไฟล์ .env แล้ว Build ใหม่</span></p>` : ""}
     <section class="sys-section"><h2>Claude</h2><dl class="facts">
       ${row("สถานะ", c.logged_in ? `<span class="badge s-done">เชื่อมต่อแล้ว</span>` : `<span class="badge s-failed">ยังไม่ได้เชื่อม</span>`)}
       ${row("วิธีล็อกอิน", esc(c.method || "ยังไม่ทราบ"))}
       ${row("Claude Code", esc(c.version || "ยังไม่ทราบ"))}
-      ${row("model / effort", esc(`${s.worker.model || "ค่าตั้งต้นของแพ็กเกจ"} / ${s.worker.effort || "ค่าตั้งต้น"}`))}
+      ${row("model", esc(s.worker.model || "ค่าตั้งต้นของแพ็กเกจ"))}
+      ${row("ระดับการคิด", esc(s.worker.effort ? `${effortName(s.worker.effort)} ทุกงาน (CLAUDE_EFFORT)` : "ตามชนิดงาน และเลือกต่องานได้"))}
       ${row("ตรวจล่าสุด", esc(fmtTime(c.checked_at) || "ยังไม่ได้ตรวจ"))}
     </dl><button type="button" class="btn" id="sysCheck">${icon("retry")}ตรวจสอบการเชื่อมต่อ</button></section>
+
+    <section class="sys-section"><h2>ความปลอดภัย</h2><dl class="facts">
+      ${row("รหัสผ่าน dashboard", sec.password ? `<span class="badge s-done">ตั้งแล้ว</span> ใส่ผิด 10 ครั้งใน 10 นาที ระบบพักการเข้าใช้จากเครื่องนั้น 10 นาที`
+        : `<span class="badge s-failed">ยังไม่ได้ตั้ง</span>`)}
+      ${row("Python ในงานคำนวณ", "ต่อเครือข่าย เรียกโปรแกรมอื่น หรือเขียนไฟล์นอกโฟลเดอร์งานไม่ได้ และอ่านรหัสผ่านหรืองานอื่นไม่ได้")}
+      ${row("คำขอจากเว็บไซต์อื่น", "ปฏิเสธ (หน้าเว็บอื่นที่เปิดในเบราว์เซอร์เดียวกันสั่งงานแทนคุณไม่ได้)")}
+      ${row("ลิงก์ปฏิทิน", sec.calendar_link ? "เปิดอยู่ (เปิดได้โดยไม่ต้องใส่รหัสผ่าน ปิดได้ที่หน้าติดตามงาน)" : "ปิดอยู่")}
+    </dl></section>
 
     <section class="sys-section"><h2>การใช้งาน subscription</h2>
       ${windows.length ? `<ul class="meters">${windows.map((w) => {

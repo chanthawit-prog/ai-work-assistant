@@ -29,8 +29,13 @@ CONVERTED = ".converted.json"  # which workbooks were already turned into CSV (h
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac", ".mp4", ".webm", ".mov", ".wma"}
 
 
+MAX_DOCX_XML = 64 * 1024 * 1024  # unpacked word/document.xml: a zip bomb must not fill the NAS's RAM
+
+
 def docx_to_text(path: Path) -> str:
     with zipfile.ZipFile(path) as zf:
+        if zf.getinfo("word/document.xml").file_size > MAX_DOCX_XML:
+            raise ValueError("word/document.xml ใหญ่ผิดปกติ")
         xml = zf.read("word/document.xml")
     root = ElementTree.fromstring(xml)
     paragraphs = []
@@ -112,8 +117,8 @@ def prepare_inputs(input_dir: Path) -> list[str]:
             if not target.exists():
                 try:
                     target.write_text(docx_to_text(path), encoding="utf-8")
-                except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
-                    warnings.append(f"อ่านไฟล์ Word ไม่ได้: {path.name}")
+                except (zipfile.BadZipFile, KeyError, ElementTree.ParseError, ValueError):
+                    warnings.append(f"อ่านไฟล์ Word ไม่ได้ (เสียหาย หรือใหญ่ผิดปกติเมื่อแตกไฟล์): {path.name}")
         elif ext in (".heic", ".heif"):
             warnings.append(f"{path.name} เป็นรูปแบบ HEIC ของ iPhone ซึ่ง Claude เปิดไม่ได้ ให้ส่งเป็น JPG แทน "
                             "(แนบผ่าน Safari จะแปลงเป็น JPG ให้เอง หรือตั้ง กล้อง › รูปแบบ › ใช้ร่วมกันได้มากที่สุด)")

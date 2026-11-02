@@ -53,6 +53,12 @@ MAX_STDERR_LINES = 40
 BASE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"  # pec_calc and kb_search, run by Claude with python3
 KB_RULE = "Bash(python3 -m kb_search *)"
+# the python3 forms Claude may run in calculation jobs: all of them load tools/sitecustomize.py, the jail (no network,
+# no other programs, no writing outside the job folder). `python3 -I` or `-S` would skip it, so they are not allowed.
+PYTHON_RULES = ["Bash(python3 -c *)", "Bash(python3 -m *)", "Bash(python3 output/*)", "Bash(python3 ./output/*)",
+                "Bash(cd *)"]
+# the app's own settings that Claude and its tools have no use for (passwords, notification tokens)
+PRIVATE_ENV_PREFIXES = ("NOTIFY_", "DASHBOARD_")
 # the app's own files in the job folder: Claude neither sees them (Glob leaves denied files out) nor spends tokens
 # reading them, and cannot overwrite them
 INTERNAL_FILES = ("job.json", "events.jsonl", "steps.jsonl")
@@ -98,6 +104,8 @@ def claude_env(low_memory: bool = True) -> dict:
     # so it must not leak through and override the level chosen for the job
     for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_EFFORT"):
         env.pop(key, None)
+    for key in [k for k in env if k.startswith(PRIVATE_ENV_PREFIXES)]:
+        env.pop(key)
     if not env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     env["DISABLE_AUTOUPDATER"] = "1"
@@ -134,6 +142,15 @@ class Runner:
     def kb_ready(self) -> bool:
         return self.kb is not None and self.kb.ready()
 
+    def jail_env(self, job_dir) -> dict:
+        """What tools/sitecustomize.py needs: the one folder Python may write to, and what it may not read
+        (Claude's login, the app's state, the other jobs and the trash)."""
+        home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        private = [home, Path.home() / ".claude.json", self.settings.state_dir, self.settings.jobs_dir,
+                   self.settings.data_dir / "trash"]
+        return {"AIWA_PYTHON_JAIL": str(job_dir), "AIWA_JAIL_NO_READ": os.pathsep.join(str(p) for p in private),
+                "PYTHONDONTWRITEBYTECODE": "1"}
+
     def effort_for(self, job: dict, job_type: JobType) -> str:
         """The job's own choice (เร็ว ปกติ ละเอียด), else CLAUDE_EFFORT, else the job type's default ("" = Claude Code's)."""
         return (job.get("params") or {}).get("effort") or self.settings.claude_effort or job_type.effort
@@ -147,7 +164,7 @@ class Runner:
         if python:
             tools.append("Bash")
             # Claude often writes `cd <job folder> && python3 ...`; each part of a chain must match a rule
-            allowed += ["Bash(python3 *)", "Bash(cd *)"]
+            allowed += PYTHON_RULES
         elif kb:
             tools.append("Bash")
             allowed.append(KB_RULE)  # every job may search the knowledge index, and run nothing else
@@ -284,8 +301,10 @@ class Runner:
         env = claude_env(self.settings.claude_low_memory)
         python = job_type.allow_python and self.settings.allow_python
         if python or kb:
-            # `python3 -m pec_calc ...` / `python3 -m kb_search ...` (and `import pec_calc`) work from the job folder
+            # `python3 -m pec_calc ...` / `python3 -m kb_search ...` (and `import pec_calc`) work from the job folder,
+            # and every python3 starts inside the jail of tools/sitecustomize.py
             env["PYTHONPATH"] = os.pathsep.join(p for p in (str(TOOLS_DIR), env.get("PYTHONPATH", "")) if p)
+            env.update(self.jail_env(job_dir))
         if python:
             env["PEC_CALC_KNOWLEDGE"] = str(self.settings.knowledge_dir)  # company tables and the team's sign-off
         if kb:
