@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import math
 import posixpath
 import re
 import sys
@@ -128,6 +129,8 @@ def _number(text: str, kind: str | None, date1904: bool) -> str:
         value = float(text)
     except ValueError:
         return text
+    if not math.isfinite(value) or abs(value) >= 1e15 or (kind and not 0 <= value < 2_958_466):  # 9999-12-31
+        return text  # too big for a date, a time or an int: shown as stored (an id or a phone number in a date column)
     if kind == "time":  # the time of day in the fraction
         seconds = round((value % 1) * 86400)
         hours, rest = divmod(seconds % 86400, 3600)
@@ -138,7 +141,7 @@ def _number(text: str, kind: str | None, date1904: bool) -> str:
         else:  # serial 60 is Excel's imaginary 29 Feb 1900
             moment = datetime(1899, 12, 30 if value >= 61 else 31) + timedelta(days=value)
         return moment.strftime("%Y-%m-%d") if value == int(value) else moment.strftime("%Y-%m-%d %H:%M")
-    if value == int(value) and abs(value) < 1e15:
+    if value == int(value):
         return str(int(value))
     return format(value, ".15g")
 
@@ -195,7 +198,7 @@ def read_workbook(path, max_rows: int = MAX_ROWS) -> list[dict]:
                         rows.append(row)
                 out.append({"name": name, "hidden": hidden, "rows": rows, "truncated": truncated})
             return out
-    except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError) as exc:
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError, ArithmeticError) as exc:
         raise XlsxError(str(exc)) from None
 
 

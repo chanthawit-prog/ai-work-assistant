@@ -84,7 +84,11 @@ async function api(path, options = {}) {
   const res = await fetch(path, options);
   const isJson = (res.headers.get("content-type") || "").includes("application/json");
   const body = isJson ? await res.json() : await res.text();
-  if (!res.ok) throw new Error((body && body.detail) || res.statusText || "เกิดข้อผิดพลาด ลองใหม่อีกครั้ง");
+  if (!res.ok) {
+    let detail = body && body.detail;
+    if (Array.isArray(detail)) detail = detail.map((d) => `${(d.loc || []).slice(-1)[0] || ""}: ${d.msg || ""}`.trim()).join(", "); // a validation error (422)
+    throw new Error(detail || (res.status === 500 ? "ระบบขัดข้อง ลองใหม่อีกครั้ง (ดู log ของ container)" : res.statusText) || "เกิดข้อผิดพลาด ลองใหม่อีกครั้ง");
+  }
   return body;
 }
 const postJSON = (path, data = {}) =>
@@ -221,12 +225,12 @@ function poll(fn) {
     clearTimeout(timer);
     let delay = 4000;
     try {
-      delay = (await fn()) ?? delay;
+      delay = (await fn(() => token !== viewToken)) ?? delay; // fn(stale): check after every await
     } catch (err) {
       console.error(err);
     }
     busy = false;
-    if (token !== viewToken) return;
+    if (token !== viewToken || delay === false) return; // false: the view asked to stop (its data is gone)
     if (again) {
       again = false;
       delay = 0;
@@ -299,6 +303,7 @@ function renderMarkdown(md) {
         code = [];
         inCode = false;
       } else {
+        flushQuote();
         flushList();
         flushTable();
         inCode = true;
@@ -397,7 +402,9 @@ function renderStatus(s) {
   if (busy || n.queued) {
     items.push(`<span class="pill ${busy ? "live" : ""}">${busy ? `<i class="dot"></i>กำลังทำ ${busy} งาน` : "ยังไม่เริ่ม"}${n.queued ? ` · คิว ${n.queued}` : ""}</span>`);
   }
-  $("#status").innerHTML = items.join("");
+  const html = items.join("");
+  if (html !== renderStatus.last) $("#status").innerHTML = html; // an aria-live region: rewrite only on change
+  renderStatus.last = html;
 }
 
 const SEND_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ + Enter" : "Ctrl + Enter";
@@ -410,6 +417,7 @@ async function refreshStatus(reschedule = true) {
     renderSetup(lastStatus.claude);
     $("#taskCount").textContent = lastStatus.open_tasks || "";
   } catch (err) {
+    renderStatus.last = null;
     $("#status").innerHTML = `<span class="pill bad"><i class="dot"></i>ติดต่อ NAS ไม่ได้ กำลังลองใหม่</span>`;
   }
   if (reschedule) setTimeout(refreshStatus, 5000);
@@ -456,7 +464,9 @@ let showAllRecent = false;
 let jobQuery = "";
 
 async function showHome() {
+  const token = viewToken;
   const types = await getJobTypes();
+  if (token !== viewToken) return; // the user moved on while the job types were loading
   $("#view").innerHTML = `
     <section class="setup" id="setup" hidden aria-live="polite"></section>
     <section class="compose" aria-labelledby="composeTitle">
@@ -551,7 +561,7 @@ async function showHome() {
     renderFiles();
   });
   message.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) form.requestSubmit();
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.repeat && !$("#cSend").disabled) form.requestSubmit();
   });
 
   form.addEventListener("submit", async (e) => {
@@ -601,11 +611,18 @@ async function showHome() {
     }
   });
 
-  poll(async () => {
+  let listSig = "";
+  poll(async (stale) => {
     const jobs = await api("/api/jobs");
+    if (stale()) return;
     lastJobs = jobs;
-    renderLists(jobs);
-    return jobs.some((j) => j.status === "running" || j.status === "queued") ? 2000 : 6000;
+    const active = jobs.some((j) => j.status === "running" || j.status === "queued");
+    // rebuilding the list under a finger loses the tap: rewrite only when the data changed, or every 10 s while
+    // a job runs so its elapsed time keeps moving
+    const sig = JSON.stringify(jobs) + (active ? Math.floor(Date.now() / 10000) : "");
+    if (sig !== listSig) renderLists(jobs);
+    listSig = sig;
+    return active ? 2000 : 6000;
   });
   poll(async () => {
     renderToday(await api("/api/today"));
@@ -751,7 +768,7 @@ function showJob(id) {
   const replyText = $("#replyText");
   autoGrow(replyText);
   replyText.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) reply.requestSubmit();
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.repeat && !$("#replySend").disabled) reply.requestSubmit();
   });
   const replyFiles = [];
   const renderReplyFiles = () => {
@@ -792,6 +809,7 @@ function showJob(id) {
       renderReplyFiles();
       headSig = "";
       if (editing) closeEditor(false);
+      refresh(); // show the queued state now, not at the next scheduled poll (up to 8 s)
     } catch (err) {
       toast(err.message, "bad");
     }
@@ -812,7 +830,7 @@ function showJob(id) {
     const sig = cur ? `${cur.modified}|${cur.size}|${job.status}|${job.rev}` : "";
     if (cur && sig !== selectedSig) {
       selectedSig = sig;
-      loadOutput(id, cur, job, startEdit);
+      loadOutput(id, cur, job, startEdit, () => token === viewToken && selected === cur.path);
     }
   };
   /* your own edit of a result that waits for review: saved straight to the file, no Claude run */
@@ -836,8 +854,19 @@ function showJob(id) {
     selectOutput(b.dataset.path);
   };
 
-  const refresh = poll(async () => {
-    const data = await api(`/api/jobs/${encodeURIComponent(id)}?after=${after}`);
+  const token = viewToken;
+  const refresh = poll(async (stale) => {
+    let data;
+    try {
+      data = await api(`/api/jobs/${encodeURIComponent(id)}?after=${after}`);
+      if (stale()) return; // another page (or another job) is showing now: its ids are the same, so do not paint
+    } catch (err) {
+      if (stale()) return;
+      if (job) throw err; // a passing network error on a page that already shows the job: keep polling
+      $("#view").innerHTML = `<a class="back" href="#/">${icon("chevron-left")}งานทั้งหมด</a>
+        <div class="empty"><h2>ไม่พบงานนี้</h2><p>งานอาจถูกลบไปแล้ว (ดูในโฟลเดอร์ trash/jobs บน NAS) หรือลิงก์ไม่ถูกต้อง</p></div>`;
+      return false;
+    }
     job = data.job;
     jobPage.handoff = data.handoff;
     const levels = `${(data.type && data.type.effort) || ""}|${(job.params && job.params.effort) || ""}`;
@@ -937,21 +966,32 @@ function renderThread(steps, job, openGroups, autoscroll = false) {
 function renderLive(job, partial, steps) {
   const live = $("#live");
   if (!live) return;
+  const write = (html) => { // an aria-live region: only a change is written (and read out)
+    if (html !== live.dataset.html) live.innerHTML = html;
+    live.dataset.html = html;
+  };
   if (job.status === "running" && partial) {
-    live.innerHTML = `<div class="msg claude typing"><span class="who">Claude กำลังพิมพ์</span>
-      <div class="bubble">${esc(partial).replace(/\n/g, "<br>")}<span class="caret" aria-hidden="true"></span></div></div>`;
+    const bubble = $(".typing .bubble", live);
+    if (bubble) { // the text grows token by token: update it in place, so screen readers do not re-read it all
+      bubble.innerHTML = `${esc(partial).replace(/\n/g, "<br>")}<span class="caret" aria-hidden="true"></span>`;
+      return;
+    }
+    write(`<div class="msg claude typing"><span class="who">Claude กำลังพิมพ์</span>
+      <div class="bubble" aria-live="off"></div></div>`);
+    renderLive(job, partial, steps);
   } else if (job.status === "running") {
-    live.innerHTML = `<p class="working"><span class="spinner" aria-hidden="true"></span>Claude กำลังทำงาน · ${esc(fmtDuration(job.started_at))}</p>`;
+    write(`<p class="working"><span class="spinner" aria-hidden="true"></span>Claude กำลังทำงาน · <span id="liveElapsed" aria-live="off"></span></p>`);
+    $("#liveElapsed").textContent = fmtDuration(job.started_at);
   } else if (job.status === "queued") {
-    live.innerHTML = job.not_before
+    write(job.not_before
       ? `<p class="working wait">${icon("clock")}โควต้าเต็ม จะเริ่มเองเวลา ${esc(fmtTime(job.not_before))}</p>`
       : job.wait && job.wait.reason === "login"
         ? `<p class="working wait">${icon("clock")}รอเชื่อม Claude subscription ก่อน ดูวิธีเชื่อมที่<a href="#/">หน้าแรก</a> งานจะเริ่มเองเมื่อเชื่อมได้</p>`
       : job.wait
         ? `<p class="working wait">${icon("clock")}${esc(memWaitText(job.wait))} จะเริ่มเองไม่เกิน ${esc(fmtClock(job.wait.start_by))}</p>`
-        : `<p class="working wait">${icon("clock")}รอคิว Claude จะเริ่มเมื่อถึงคิว</p>`;
+        : `<p class="working wait">${icon("clock")}รอคิว Claude จะเริ่มเมื่อถึงคิว</p>`);
   } else {
-    live.innerHTML = "";
+    write("");
   }
 }
 
@@ -1191,14 +1231,14 @@ function actionItemsTable(items) {
     .join("")}</tbody></table></div>`;
 }
 
-async function loadOutput(jobId, file, job, onEdit) {
+async function loadOutput(jobId, file, job, onEdit, current = () => true) {
   const view = $("#outView");
   if (!view) return;
   const path = file.path;
   const tools = $("#outTools");
   try {
     const f = await api(fileUrl(jobId, "output", path));
-    if (editing) return; // opened while this file was loading
+    if (editing || !current()) return; // the editor opened, another tab was chosen, or the page changed meanwhile
     const canEdit = Boolean(f.editable && onEdit && job && job.status === "needs_review");
     if (tools) {
       tools.innerHTML = (f.binary ? "" : `<button type="button" class="btn quiet" id="copyOut">${icon("copy")}คัดลอก</button>`)
@@ -1351,9 +1391,14 @@ function showTasks() {
   };
   $("#taskAdd").onclick = () => openTaskForm(null);
   $("#calOpen").onclick = () => toggleCalendar();
-  poll(async () => {
-    taskItems = await api(`/api/tasks?include_done=${showDone}`);
-    renderTasks(taskItems);
+  let sig = "";
+  poll(async (stale) => {
+    const items = await api(`/api/tasks?include_done=${showDone}`);
+    if (stale()) return;
+    taskItems = items;
+    const next = JSON.stringify(items) + new Date().toDateString(); // "อีก N วัน" changes at midnight
+    if (next !== sig) renderTasks(items); // an open form or a confirm must not be wiped by the refresh
+    sig = next;
     return 15000;
   });
 }
@@ -1485,7 +1530,8 @@ function openTaskForm(item) {
       <button type="button" class="btn quiet" id="tDeleteNo">ไม่ลบ</button>`;
     $("#tDeleteNo").onclick = () => openTaskForm(item);
     $("#tDeleteYes").onclick = async (e) => {
-      e.currentTarget.disabled = true;
+      const yes = e.currentTarget; // null after the await
+      yes.disabled = true;
       try {
         await api(`/api/tasks/${encodeURIComponent(item.id)}`, { method: "DELETE" });
         toast(`ลบ ${item.id} แล้ว`);
@@ -1493,7 +1539,7 @@ function openTaskForm(item) {
         refreshTasks();
       } catch (err) {
         toast(err.message, "bad");
-        e.currentTarget.disabled = false;
+        yes.disabled = false;
       }
     };
     $("#tDeleteNo").focus();
@@ -1634,15 +1680,22 @@ async function showCustomers() {
     customerQuery = e.target.value;
     render();
   });
-  poll(async () => {
-    list = await api("/api/customers");
-    render();
+  let sig = "";
+  poll(async (stale) => {
+    const next = await api("/api/customers");
+    if (stale()) return;
+    list = next;
+    const s = JSON.stringify(next);
+    if (s !== sig) render();
+    sig = s;
     return 30000;
   });
 }
 
 async function showCustomer(name) {
+  const token = viewToken;
   const c = await api(`/api/customers/${encodeURIComponent(name)}`);
+  if (token !== viewToken) return; // the user moved on while it was loading
   const start = (type) => `#/?type=${type}&customer=${encodeURIComponent(c.name)}`;
   const waiting = c.jobs.filter((j) => j.status === "needs_review").length;
   /* one row per approved job: its Word file (to send) and its text (.md) */
@@ -1740,9 +1793,14 @@ async function showSchedules() {
       <div id="schList" aria-busy="true">${skeletonRows(2)}</div>
     </section>`;
   $("#schAdd").addEventListener("click", () => openScheduleForm(null));
-  poll(async () => {
-    scheduleData = await api("/api/schedules");
-    renderSchedules();
+  let sig = "";
+  poll(async (stale) => {
+    const next = await api("/api/schedules");
+    if (stale()) return;
+    scheduleData = next;
+    const s = JSON.stringify(next.items);
+    if (s !== sig) renderSchedules(); // an open "ยืนยันลบ" must not be wiped by the refresh
+    sig = s;
     return 30000;
   });
 }
@@ -1838,6 +1896,7 @@ async function onScheduleAction(e) {
 }
 
 async function openScheduleForm(s) {
+  scheduleData ||= await api("/api/schedules"); // "เพิ่มงานประจำ" clicked before the first load answered
   const types = (await getJobTypes()).filter((t) => scheduleData.types.includes(t.id));
   const v = s || { name: "", type: "general", instructions: "", customer: "", days: ["mon", "tue", "wed", "thu", "fri"], time: "08:30", include: [], enabled: true };
   const holder = $("#schForm");
@@ -2038,7 +2097,9 @@ function wireKnowledge() {
     }
   });
   $("#kbRefresh").addEventListener("click", async (e) => {
-    e.currentTarget.disabled = true;
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    setTimeout(() => { btn.disabled = false; }, 3000); // usable again after a moment, also after an error
     try {
       const r = await postJSON("/api/knowledge/refresh");
       toast(r.busy ? "จะอัปเดตดัชนีเมื่อไม่มีงานที่กำลังทำและ RAM ว่างพอ" : "เริ่มอัปเดตดัชนีแล้ว");
@@ -2052,7 +2113,9 @@ async function showSystem() {
       <div class="page-head"><div><h1 id="sysTitle">ระบบ</h1>
         <p class="lede">สถานะการเชื่อมต่อ Claude การใช้งาน subscription การแจ้งเตือน หน่วยความจำ ค้นคลังความรู้ และที่เก็บข้อมูลบน NAS</p></div></div>
       <div id="sysBody" aria-busy="true">${skeletonRows(3)}</div></section>`;
+  const token = viewToken;
   const s = await api("/api/system");
+  if (token !== viewToken) return; // the user moved on while it was loading (it walks the knowledge folder)
   const c = s.claude || {};
   const windows = quotaWindows(s.quota);
   const pct = (u) => (typeof u === "number" ? Math.round(u <= 1 ? u * 100 : u) : null);
@@ -2189,6 +2252,7 @@ async function loadReadiness() {
 
 /* ---------------------------------------------------------------- router */
 function route() {
+  if (location.hash === "#view") return $("#view").focus(); // the skip link: move to the content, do not re-render
   if (unsaved() && !confirm("ยังไม่ได้บันทึกที่แก้ไว้ ออกจากหน้านี้และทิ้งที่แก้หรือไม่?")) {
     if (location.hash !== editing.hash) history.replaceState(null, "", editing.hash);
     return;
@@ -2208,8 +2272,10 @@ function route() {
     }
   });
   window.scrollTo(0, 0);
+  $("#view").focus({ preventScroll: true }); // keyboard and screen-reader users start at the new page
   if (lastStatus) refreshStatus(false);
-  const fail = (err) => ($("#view").innerHTML = `<p class="muted">${esc(err.message)}</p>`);
+  const token = viewToken;
+  const fail = (err) => { if (token === viewToken) $("#view").innerHTML = `<p class="muted">${esc(err.message)}</p>`; };
   if (hash.startsWith("#/job/")) return showJob(decodeURIComponent(hash.slice(6)));
   if (hash.startsWith("#/tasks")) return showTasks();
   if (hash.startsWith("#/customers")) return showCustomers().catch(fail);

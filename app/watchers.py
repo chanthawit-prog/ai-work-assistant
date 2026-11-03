@@ -73,7 +73,7 @@ class InboxWatcher:
     async def loop(self) -> None:
         while True:
             try:
-                self.scan_once()
+                await asyncio.to_thread(self.scan_once)  # moving and converting a dropped file must not block the loop
             except Exception:
                 log.exception("inbox scan failed")
             await asyncio.sleep(self.settings.inbox_poll_sec)

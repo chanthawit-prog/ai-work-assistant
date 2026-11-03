@@ -201,8 +201,8 @@ def test_calendar_feed_is_private_and_valid(settings, monkeypatch):
         assert unfolded.startswith("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n") and unfolded.endswith("END:VCALENDAR\r\n")
         assert unfolded.count("BEGIN:VEVENT") == 1  # only open items with a due date
         assert "DTSTART;VALUE=DATE:20261106\r\n" in unfolded and "DTEND;VALUE=DATE:20261107\r\n" in unfolded
-        assert "SUMMARY:ส่งแบบไฟฟ้า\\, ฉบับแก้ไข\; Rev.2" in unfolded
-        assert "หมายเหตุ: บรรทัด 1\\nบรรทัด 2" in unfolded and "ที่มา: ประชุม ACME\\, รอบ 2\; สรุป" in unfolded
+        assert "SUMMARY:ส่งแบบไฟฟ้า\\, ฉบับแก้ไข\\; Rev.2" in unfolded
+        assert "หมายเหตุ: บรรทัด 1\\nบรรทัด 2" in unfolded and "ที่มา: ประชุม ACME\\, รอบ 2\\; สรุป" in unfolded
         assert "PRIORITY:1\r\n" in unfolded and "TRIGGER:-PT15H" in unfolded
         assert f"URL:http://nas.local:8080/#/job/{job['id']}\r\n" in unfolded
         assert "UID:A-0001-" in unfolded and "@ai-work-assistant" in unfolded

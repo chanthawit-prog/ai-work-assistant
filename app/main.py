@@ -42,7 +42,7 @@ from .tasks import TaskStore
 from .today import DigestScheduler, summary as today_summary
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.11.1"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
@@ -153,16 +153,22 @@ def stage_uploads(staging: Path, uploads: list[UploadFile], max_bytes: int) -> l
 
 
 class UploadLimit:
-    """Refuse an oversized upload from its Content-Length, before the body is read or spooled anywhere."""
+    """Refuse an oversized request from its Content-Length, before the body is read or spooled anywhere:
+    uploads (POST forms) up to MAX_UPLOAD_MB, and JSON bodies (PUT: an edited result, a follow-up item) up to a
+    few MB, so a huge request cannot fill the NAS's RAM."""
+
+    JSON_MAX = 4 * MB
 
     def __init__(self, app, max_bytes: int, message: str):
         self.app, self.max_bytes, self.message = app, max_bytes, message
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope["method"] == "POST":
+        if scope["type"] == "http" and scope["method"] in ("POST", "PUT", "PATCH"):
             length = dict(scope["headers"]).get(b"content-length", b"")
-            if length.isdigit() and int(length) > self.max_bytes + 256 * 1024:  # room for the form fields
-                await JSONResponse({"detail": self.message}, status_code=413)(scope, receive, send)
+            limit = self.max_bytes + 256 * 1024 if scope["method"] == "POST" else self.JSON_MAX  # room for the form fields
+            if length.isdigit() and int(length) > limit:
+                message = self.message if scope["method"] == "POST" else f"ข้อมูลที่ส่งใหญ่เกิน {self.JSON_MAX // MB} MB"
+                await JSONResponse({"detail": message}, status_code=413)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
@@ -466,7 +472,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         job_type = JOB_TYPES.get(type)
         if job_type is None:
             raise HTTPException(400, "ไม่รู้จักชนิดงานนี้")
-        values = {"title": title.strip(), "instructions": instructions.strip(), "customer": customer.strip()}
+        # titles name the job everywhere (and the library files); customer names are folder names and page titles
+        values = {"title": title.strip()[:150], "instructions": instructions.strip(), "customer": customer.strip()[:120]}
         uploads = [f for f in files if f.filename]
         names = [f.filename for f in uploads]
         for field in job_type.fields:
@@ -489,7 +496,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         finally:
             if staging:
                 shutil.rmtree(staging, ignore_errors=True)
-        warnings = prepare_inputs(store.area_dir(job["id"], "input"))
+        # conversion in a thread: the worker converts anything still missing when the job starts
+        warnings = await asyncio.to_thread(prepare_inputs, store.area_dir(job["id"], "input"))
         if warnings:
             job = store.update(job["id"], warnings=warnings)
         return job_view(job)
@@ -539,6 +547,9 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         """Start the next job from this result (no await inside: the worker must not see the new job half-made)."""
         job = handoff(store, job_id, body.type, body.instructions, body.title, body.customer, body.files, body.inputs,
                       clean_effort(body.effort))
+        warnings = await asyncio.to_thread(prepare_inputs, store.area_dir(job["id"], "input"))
+        if warnings:
+            job = store.update(job["id"], warnings=sorted(set(store.get(job["id"]).get("warnings") or []) | set(warnings)))
         return job_view(job)
 
     @app.post("/api/jobs/{job_id}/approve")
@@ -564,18 +575,18 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             if staging:
                 shutil.rmtree(staging, ignore_errors=True)
         if names:
-            warnings = prepare_inputs(store.area_dir(job_id, "input"))
+            warnings = await asyncio.to_thread(prepare_inputs, store.area_dir(job_id, "input"))
             if warnings:
                 job = store.get(job_id)
                 store.update(job_id, warnings=sorted(set(job.get("warnings") or []) | set(warnings)))
         if level is not None:
             params = {k: v for k, v in (store.get(job_id).get("params") or {}).items() if k != "effort"}
             store.update(job_id, params={**params, **({"effort": level} if level else {})})
-        return job_view(runner.send_message(job_id, message, files=names))
+        return job_view(await asyncio.to_thread(runner.send_message, job_id, message, names))
 
     @app.post("/api/jobs/{job_id}/revise")
     async def revise_job(job_id: str, body: MessageIn):  # JSON form, kept for scripts written against v0.1
-        return job_view(runner.send_message(job_id, body.message or body.feedback))
+        return job_view(await asyncio.to_thread(runner.send_message, job_id, body.message or body.feedback))
 
     @app.get("/api/jobs/{job_id}/export/{rel:path}")
     async def export_docx(job_id: str, rel: str):

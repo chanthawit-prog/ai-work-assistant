@@ -54,7 +54,7 @@ def handoff(store: JobStore, job_id: str, type_id: str, instructions: str = "", 
 
     params = source.get("params") or {}
     values = {"instructions": instructions.strip(),
-              "customer": (params.get("customer", "") if customer is None else customer).strip()}
+              "customer": (params.get("customer", "") if customer is None else customer).strip()[:120]}
     for field in job_type.fields:
         if field.required and field.kind != "files" and field.name in values and not values[field.name]:
             raise ValueError(f"กรุณากรอก: {field.label}")
@@ -71,9 +71,8 @@ def handoff(store: JobStore, job_id: str, type_id: str, instructions: str = "", 
     job = store.create(type_id, title, values["instructions"], new_params, source="handoff")
     names = {area: [store.copy_file(job["id"], "input", Path(p.name).name, p) for p in found]
              for area, found in paths.items()}
-    warnings = prepare_inputs(store.area_dir(job["id"], "input"))
-    job = store.update(job["id"], params={**new_params, "from_files": names["output"], "from_inputs": names["input"]},
-                       warnings=warnings)
+    # the caller converts the inputs (xlsx -> csv) afterwards, in a thread; the worker converts anything missing too
+    job = store.update(job["id"], params={**new_params, "from_files": names["output"], "from_inputs": names["input"]})
     with store.lock:
         current = store.get(job_id)
         if current is not None:

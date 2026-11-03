@@ -61,6 +61,67 @@ def test_python_in_a_job_cannot_reach_out(folders, what, code):
     assert not (job.parent.parent / "outside.txt").exists()
 
 
+def test_sqlite_is_read_only_and_the_jobs_records_are_off_limits(folders, tmp_path):
+    """SQLite creates files by itself (ATTACH DATABASE on a read-write connection, even an in-memory one) without
+    Python's open(), so the jail allows one database only: the knowledge index, read-only."""
+    job, jobs, login = folders
+    (job / "job.json").write_text('{"status": "running"}', encoding="utf-8")
+    (job / "steps.jsonl").write_text("", encoding="utf-8")
+    index = tmp_path / "kb.sqlite"
+    env = {"KB_INDEX": str(index)}
+    outside = job.parents[2] / "evil-attach.db"
+    for code in (f"import sqlite3; sqlite3.connect(':memory:').execute(\"ATTACH '{outside}' AS e\")",
+                 f"import sqlite3; sqlite3.connect({str(index)!r}).execute(\"ATTACH '{outside}' AS e\")",
+                 "import sqlite3; sqlite3.connect('output/calc.db')"):
+        result = jailed(job, code, login, jobs, extra_env=env)
+        assert result.returncode != 0 and REFUSED in result.stderr, code
+    assert not outside.exists() and not index.exists()
+    import sqlite3
+    sqlite3.connect(index).execute("create table t(x)").connection.commit()
+    ok = jailed(job, f"import sqlite3; c = sqlite3.connect('file:{index}?mode=ro', uri=True); print(c.execute('select count(*) from t').fetchone())",
+                login, jobs, extra_env=env)
+    assert ok.returncode == 0 and "(0,)" in ok.stdout, ok.stderr
+    for code in ("open('job.json', 'w').write('{}')", "open('job.json').read()", "open('steps.jsonl').read()",
+                 "import os; os.rename('steps.jsonl', 'output/s.txt')"):
+        result = jailed(job, code, login, jobs)
+        assert result.returncode != 0 and REFUSED in result.stderr, code
+    assert (job / "job.json").read_text(encoding="utf-8") == '{"status": "running"}'
+
+
+def test_directory_descriptors_links_and_chdir_cannot_get_around_the_checks(folders):
+    """The checks resolve a relative path against the working directory; os.open(..., dir_fd=) resolves it
+    against another directory (and its audit event does not say so). So no directory may be opened, no path
+    given with a dir_fd is accepted, the working directory cannot move, hard links read their source and no
+    symbolic links are made. (The review found these four escapes.)"""
+    job, jobs, login = folders
+    secret = login / ".credentials.json"
+    outside = job.parents[2] / "evil-dirfd"
+    vectors = [
+        f"import os; fd = os.open({str(outside.parent)!r}, os.O_RDONLY); os.open('evil-dirfd', os.O_WRONLY | os.O_CREAT, dir_fd=fd)",
+        f"import os; fd = os.open({str(login.parent)!r}, os.O_RDONLY); print(os.read(os.open({str(login.name + '/.credentials.json')!r}, os.O_RDONLY, dir_fd=fd), 100))",
+        f"import os; open('output/m', 'w').write('x'); s = os.open('.', os.O_RDONLY); d = os.open({str(outside.parent)!r}, os.O_RDONLY); os.rename('output/m', 'evil-dirfd', src_dir_fd=s, dst_dir_fd=d)",
+        f"import os; os.link({str(secret)!r}, 'output/h'); print(open('output/h').read())",
+        "import os; os.link('job.json', 'output/j'); print(open('output/j').read())",
+        f"import os; os.chdir({str(login.parent)!r}); print(open('.claude/.credentials.json').read())",
+        f"import os; os.symlink({str(login)!r}, 'output/l'); print(open('output/l/.credentials.json').read())",
+        "import os; os.unlink('job.json', dir_fd=0)",
+    ]
+    (job / "job.json").write_text("{}", encoding="utf-8")
+    for code in vectors:
+        result = jailed(job, code, login, jobs)
+        assert result.returncode != 0 and REFUSED in result.stderr and "TOKEN" not in result.stdout, code
+    assert not outside.exists() and not (job / "output" / "h").exists()
+    # what calculations do still works: listing, walking, a temp folder, a tree copy, deleting file by file
+    ok = jailed(job, "import os, shutil, tempfile; d = tempfile.mkdtemp(dir='output'); open(d + '/a', 'w').write('x');"
+                     "shutil.copytree(d, 'output/copy'); os.remove('output/copy/a'); os.rmdir('output/copy');"
+                     "print(len(os.listdir('.')), sum(1 for _ in os.walk('.')))", login, jobs)
+    assert ok.returncode == 0 and ok.stdout.strip(), ok.stderr
+    # a refusal is an OSError but not a PermissionError: TemporaryDirectory then fails once instead of recursing
+    tmp = jailed(job, "import tempfile\nwith tempfile.TemporaryDirectory(dir='output') as d: open(d + '/x', 'w').write('1')",
+                 login, jobs)
+    assert REFUSED in tmp.stderr and "RecursionError" not in tmp.stderr
+
+
 def test_secrets_and_other_jobs_are_unreadable_but_the_job_itself_is_fine(folders):
     job, jobs, login = folders
     assert REFUSED in jailed(job, f"open({str(login / '.credentials.json')!r}).read()", login, jobs).stderr
@@ -205,3 +266,12 @@ def test_zip_bombs_are_refused_before_they_unpack(tmp_path, monkeypatch):
     monkeypatch.setattr(xlsx_text, "MAX_SHEET_XML", 10)  # pretend each sheet unpacked to more than the limit
     with pytest.raises(xlsx_text.XlsxError):
         xlsx_text.read_workbook(sample)
+
+
+def test_huge_json_bodies_are_refused_by_their_length(settings):
+    app = create_app(settings, start_background=False)
+    with TestClient(app) as client:
+        big = client.put("/api/tasks/A-0001", content=b"{}", headers={"Content-Length": str(10 * 1024 * 1024),
+                                                                       "Content-Type": "application/json"})
+        assert big.status_code == 413 and "MB" in big.json()["detail"]
+        assert client.post("/api/tasks", json={"task": "เล็ก"}).status_code == 200

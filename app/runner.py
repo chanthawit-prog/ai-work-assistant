@@ -271,9 +271,11 @@ class Runner:
         run_no = len(job["runs"]) + 1
         kind = "message" if feedback else ("retry" if job["runs"] else "initial")
 
-        warnings = prepare_inputs(job_dir / "input")
+        # file work in a thread: converting a big workbook or copying a customer's history must not freeze the
+        # dashboard and the other loops (the Docker healthcheck would restart the container)
+        warnings = await asyncio.to_thread(prepare_inputs, job_dir / "input")
         inputs = [f["path"] for f in self.store.list_files(job_id, "input")]
-        context = self.prepare_context(job, job_type)
+        context = await asyncio.to_thread(self.prepare_context, job, job_type)
         prompt = task_message(job, job_type, self.settings, inputs, context, feedback=feedback, resumed=bool(resume),
                               new_files=new_files, edited=edited)
         kb = self.kb_ready()
@@ -318,7 +320,7 @@ class Runner:
         self.procs[job_id] = proc
         mem_task = asyncio.create_task(self._watch_memory(job_id, proc))
         if job_id in self.cancel_reasons:  # cancelled while we were preparing
-            asyncio.create_task(self._terminate(proc))
+            self._keep(asyncio.create_task(self._terminate(proc)))
         try:
             proc.stdin.write(prompt.encode("utf-8"))
             await proc.stdin.drain()
@@ -394,14 +396,18 @@ class Runner:
             if event.get("type") == "assistant" and event.get("parent_tool_use_id") is None:
                 self.partial.pop(job_id, None)
             self.store.append_event(job_id, run_no, event)
-            known_session = meta.session_id
-            meta.observe(event)
-            if meta.session_id and meta.session_id != known_session:
-                self.store.update(job_id, session_id=meta.session_id)
-            if event.get("type") == "rate_limit_event":
-                self.state.set_quota(event.get("rate_limit_info") or {})
-            for step in summarize(event, job_dir, str(self.settings.knowledge_dir)):
-                self._step(job_id, run_no, step["kind"], step["text"])
+            try:  # one event in a shape this code does not expect must not fail the whole run
+                known_session = meta.session_id
+                meta.observe(event)
+                if meta.session_id and meta.session_id != known_session:
+                    self.store.update(job_id, session_id=meta.session_id)
+                if event.get("type") == "rate_limit_event" and isinstance(event.get("rate_limit_info"), dict):
+                    self.state.set_quota(event["rate_limit_info"])
+                for step in summarize(event, job_dir, str(self.settings.knowledge_dir)):
+                    self._step(job_id, run_no, step["kind"], step["text"])
+            except Exception:
+                log.exception("event of job %s not understood: %s", job_id, line[:300])
+                self._step(job_id, run_no, "warn", f"อ่าน event จาก Claude Code ไม่ได้ 1 รายการ ({event.get('type')})")
 
     def _track_partial(self, job_id: str, event: dict) -> None:
         if event.get("parent_tool_use_id") is not None:
@@ -494,6 +500,12 @@ class Runner:
         self._notify(job, {NEEDS_REVIEW: "needs_review", FAILED: "failed", QUEUED: "quota_wait"}.get(status))
         self.partial.pop(job_id, None)
 
+    def _keep(self, task: asyncio.Task) -> None:
+        """Hold a reference to a fire-and-forget task: the event loop keeps only weak ones, so an unreferenced
+        task can be garbage-collected before it finishes (asyncio documentation)."""
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
     def _notify(self, job: dict, event: str | None) -> None:
         if not event or self.notifier is None or not self.notifier.channels:
             return
@@ -543,7 +555,7 @@ class Runner:
         self.cancel_reasons[job_id] = "cancel"
         proc = self.procs.get(job_id)
         if proc is not None:
-            asyncio.create_task(self._terminate(proc))
+            self._keep(asyncio.create_task(self._terminate(proc)))
         return job
 
     def retry(self, job_id: str) -> dict:
@@ -565,7 +577,14 @@ class Runner:
 
     def send_message(self, job_id: str, message: str, files: list[str] | None = None) -> dict:
         """Talk to Claude again in the same job: ask a follow-up, request changes, or continue after a failure.
-        Claude resumes its earlier session, so it remembers the files and the conversation."""
+        Claude resumes its earlier session, so it remembers the files and the conversation. Waits for an approval
+        or an edit of the same job to finish first (the review lock), so the two never interleave."""
+        from .review import review_lock  # review imports the store too; imported here to keep the modules apart
+
+        with review_lock:
+            return self._send_message(job_id, message, files)
+
+    def _send_message(self, job_id: str, message: str, files: list[str] | None) -> dict:
         self.check_can_message(job_id)
         files = list(files or [])
         if not message.strip() and not files:
@@ -597,7 +616,9 @@ class Runner:
             await self.run_job(job_id)
         except Exception as exc:  # keep the worker alive whatever happens in one job
             log.exception("job %s crashed", job_id)
-            self.procs.pop(job_id, None)
+            proc = self.procs.pop(job_id, None)
+            if proc is not None and proc.returncode is None:  # do not leave Claude running (and spending quota) unwatched
+                self._keep(asyncio.create_task(self._terminate(proc)))
             self.peak_mem.pop(job_id, None)
             self.forced_start.pop(job_id, None)
             try:

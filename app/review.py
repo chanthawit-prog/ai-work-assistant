@@ -21,7 +21,7 @@ from .tasks import TaskStore
 log = logging.getLogger("assistant.review")
 # an edit and an approval of the same result never overlap, so the library always gets the version you saw;
 # a separate lock from the store's, so the Word conversion never holds up a running job
-_review_lock = threading.Lock()
+review_lock = threading.Lock()
 EDITABLE_EXTS = (".md", ".txt")
 CHANGED_MESSAGE = ("ไฟล์นี้ถูกแก้ไปแล้วหลังจากคุณเปิดแก้ (จากหน้าต่างอื่นหรือเครื่องอื่น) จึงยังไม่ได้บันทึก "
                    "คัดลอกข้อความที่แก้ไว้เก็บก่อน แล้วกดยกเลิกเพื่อโหลดฉบับล่าสุด")
@@ -58,7 +58,7 @@ def save_edit(store: JobStore, job_id: str, rel: str, text: str, base_sha: str =
     path = store.file_path(job_id, "output", rel)
     if path.suffix.lower() not in EDITABLE_EXTS:
         raise ValueError("แก้ไขเองได้เฉพาะไฟล์ .md และ .txt")
-    with _review_lock, store.lock:  # the status check and the write happen before a message can start a run
+    with review_lock, store.lock:  # the status check and the write happen before a message can start a run
         job = store.get(job_id)
         if job is None or not path.is_file():
             raise KeyError(rel)
@@ -87,7 +87,7 @@ def slugify(text: str) -> str:
 
 
 def approve(store: JobStore, tasks: TaskStore, settings: Settings, job_id: str, note: str = "") -> dict:
-    with _review_lock:
+    with review_lock:
         return _approve(store, tasks, settings, job_id, note)
 
 

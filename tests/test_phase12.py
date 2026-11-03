@@ -110,3 +110,17 @@ def test_today_api_and_send_now(settings):
         no_channel = client.post("/api/notify/digest")
         assert no_channel.status_code == 409 and "ช่องทางแจ้งเตือน" in no_channel.json()["detail"]
         assert client.get("/api/system").json()["notify"]["digest_time"] == ""
+
+
+def test_a_bad_digest_time_never_fires_and_is_reported(parts, settings):
+    from app import readiness
+
+    store, tasks, _state, _runner = parts
+    schedules = setup_day(parts, settings)
+    notifier = FakeNotifier()
+    bad = DigestScheduler(store, tasks, schedules, RuntimeState(settings.state_dir / "bad.json"),
+                          replace(settings, digest_time="25:00"), notifier)
+    assert asyncio.run(bad.tick(MONDAY)) is None and notifier.sent == []  # no ValueError every 30 s in the loop
+    items = {i["key"]: i for i in readiness.run_checks(replace(settings, digest_time="25:00", followup_time="8"), None, [], 0)["items"]}
+    assert items["digest_time"]["status"] == "fail" and items["followup_time"]["status"] == "fail"
+    assert "digest_time" not in {i["key"] for i in readiness.run_checks(replace(settings, digest_time="07:30"), None, [], 0)["items"]}

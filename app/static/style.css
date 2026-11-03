@@ -414,7 +414,9 @@ label, .label { font-size: var(--fs-small); font-weight: 500; }
 .tabs button:hover { border-color: var(--control); color: var(--ink); }
 .tabs button[aria-selected="true"] { border-color: var(--ink-2); background: var(--surface); color: var(--ink); font-weight: 500; }
 .sheet { border: 1px solid var(--control); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
-.doc { padding: var(--s5) var(--s4); line-height: 1.75; }
+.doc { padding: var(--s5) var(--s4); line-height: 1.75; overflow-wrap: anywhere; } /* a long file name or URL must wrap on a phone */
+.bubble { overflow-wrap: anywhere; }
+.convo, .output { min-width: 0; }
 .doc > :first-child { margin-top: 0; }
 .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 { margin: 1.5em 0 0.5em; }
 .doc h2 { margin-top: 0; font-size: var(--fs-h1); }
@@ -609,6 +611,7 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
 .customer-list .job-meta { grid-column: 1; }
 .customer-list .icon { grid-column: 2; grid-row: 1 / span 2; color: var(--ink-3); }
 .customer-name { font-weight: 600; }
+.customer-list .customer-name, .customer-list .job-meta, .customer-head h1 { min-width: 0; overflow-wrap: anywhere; } /* a long name without spaces must wrap, not widen the page */
 .customer-head .actions { flex-wrap: wrap; }
 .customer-grid { display: grid; gap: var(--s6); margin-top: var(--s5); }
 .customer-grid .group { margin-bottom: var(--s5); }
@@ -702,5 +705,6 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
   .tabs button, .icon-btn { min-height: 44px; min-width: 44px; }
   .files li { min-height: 44px; }
   .kbd-hint { display: none; } /* no keyboard shortcuts on a phone */
+  .quick-dates .btn { min-height: 44px; }
   .effort-pick select { min-height: 44px; }
 }

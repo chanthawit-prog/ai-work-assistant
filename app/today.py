@@ -119,9 +119,9 @@ class DigestScheduler:
             return False
         try:
             hour, minute = (int(x) for x in self.settings.digest_time.split(":"))
-        except ValueError:
+            start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except ValueError:  # DIGEST_TIME is not a time of day: never due (the readiness check reports it)
             return False
-        start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return (WEEKDAYS[now.weekday()] in self.settings.followup_days and start <= now < start + LATE_WINDOW
                 and self.state.get("digest_last") != now.date().isoformat())
 

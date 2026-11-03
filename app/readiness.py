@@ -129,6 +129,14 @@ def check_tools(settings: Settings) -> list[dict]:
     return out
 
 
+def valid_time(value: str) -> bool:
+    try:
+        hour, minute = (int(x) for x in value.split(":"))
+    except ValueError:
+        return False
+    return 0 <= hour <= 23 and 0 <= minute <= 59
+
+
 def check_settings(settings: Settings, channels: list[str], kb_files: int | None) -> list[dict]:
     out = []
     if settings.dashboard_password:
@@ -147,6 +155,10 @@ def check_settings(settings: Settings, channels: list[str], kb_files: int | None
                         "ตั้ง TZ=Asia/Bangkok (docker-compose.yml ตั้งไว้แล้ว ถ้าลบออกให้ใส่คืน)"))
     else:
         out.append(item("timezone", "เขตเวลา", INFO, f"{now:%H:%M} ({zone})"))
+    for name, value in (("FOLLOWUP_TIME", settings.followup_time), ("DIGEST_TIME", settings.digest_time)):
+        if value and not valid_time(value):
+            out.append(item(name.lower(), f"เวลาใน {name}", FAIL, f'"{value}" ไม่ใช่เวลา',
+                            f"ใส่เป็น ชั่วโมง:นาที 24 ชั่วโมง เช่น 07:30 ในไฟล์ .env"))
     host = sysmon.host_memory()
     box = sysmon.container_memory(host_total_mb=host["total_mb"] if host else None)
     if box is None:
