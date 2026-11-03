@@ -2122,7 +2122,7 @@ function knowledgeSection() {
     <div id="kbStatus"><p class="small muted">กำลังโหลด…</p></div>
     <form class="kb-search" id="kbForm" role="search">
       <label class="search">${icon("search")}<span class="sr-only">ค้นในคลังความรู้</span>
-        <input type="search" id="kbQuery" placeholder="ค้นใน PDF, Word และไฟล์ข้อความ เช่น แรงดันตก" autocomplete="off"></label>
+        <input type="search" id="kbQuery" placeholder="ค้นใน PDF (รวมภาพสแกน), Word, Excel และไฟล์ข้อความ เช่น แรงดันตก" autocomplete="off"></label>
       <button type="submit" class="btn">ค้น</button>
     </form>
     <div id="kbResults" aria-live="polite"></div>
@@ -2138,7 +2138,7 @@ function highlight(text, terms) {
 }
 async function loadKnowledge() {
   const el = $("#kbStatus");
-  if (!el) return;
+  if (!el) return null;
   const k = await api("/api/knowledge");
   const row = (a, b) => `<div><dt>${esc(a)}</dt><dd>${b}</dd></div>`;
   const kinds = Object.entries(k.by_kind || {}).map(([x, n]) => `${KB_KIND[x] || x} ${n}`).join(" · ");
@@ -2150,9 +2150,13 @@ async function loadKnowledge() {
     <dl class="facts">
       ${row("ไฟล์ที่ค้นได้", k.files ? `${k.files} ไฟล์ · ${esc(kinds)}<br><span class="small muted">${esc(roots)}</span>` : `<span class="muted">ยังไม่มี วางเอกสารไว้ใน knowledge/ แล้วระบบจะทำดัชนีให้เองเมื่อว่าง</span>`)}
       ${row("อัปเดตล่าสุด", `${esc(fmtTime(k.updated_at) || "ยังไม่เคย")}${k.running ? " · กำลังอัปเดต…" : ""} <span class="small muted">(ตรวจไฟล์ใหม่ทุก ${k.refresh_min} นาที เมื่อไม่มีงานที่กำลังทำ)</span>`)}
+      ${k.ocr ? row("PDF ที่เป็นภาพสแกน (OCR)", k.ocr.usable
+        ? `เปิด · tesseract ${esc(k.ocr.version)} ภาษา ${esc(k.ocr.langs)} · อ่านแล้ว ${k.ocr_files || 0} ไฟล์ (${k.ocr_pages || 0} หน้า) <span class="small muted">ไฟล์ละไม่เกิน ${k.ocr.max_pages} หน้า ทำเมื่อไม่มีงาน และเมื่อแนบไฟล์สแกนกับงาน</span>`
+        : `<span class="muted">${esc(k.ocr.reason)}</span>`) : ""}
     </dl>
     ${notes.length ? `<details class="kb-notes"><summary>ไฟล์ที่อ่านไม่ได้หรือได้ไม่ครบ ${notes.length} ไฟล์</summary>
       <ul>${notes.map((n) => `<li><code>${esc(n.path)}</code> ${esc(n.note)}</li>`).join("")}</ul></details>` : ""}`;
+  return k;
 }
 function wireKnowledge() {
   const form = $("#kbForm");
@@ -2182,7 +2186,14 @@ function wireKnowledge() {
       const r = await postJSON("/api/knowledge/refresh");
       toast(r.busy ? "จะอัปเดตดัชนีเมื่อไม่มีงานที่กำลังทำและ RAM ว่างพอ" : "เริ่มอัปเดตดัชนีแล้ว");
     } catch (err) { toast(err.message, "bad"); }
-    setTimeout(() => loadKnowledge().catch(() => {}), 1500);
+    const started = Date.now();
+    const follow = async () => { // the index works in the background (OCR can take minutes): show the numbers when it is done
+      if (!$("#kbStatus")) return;
+      const k = await loadKnowledge().catch(() => null);
+      const pending = k && (k.running || !k.last || Date.parse(k.last.at) < started - 1000);
+      if (pending && Date.now() - started < 180000) setTimeout(follow, 2000);
+    };
+    setTimeout(follow, 1500);
   });
 }
 

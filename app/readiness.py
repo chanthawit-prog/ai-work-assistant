@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import sysmon
 from .config import Settings
+from .knowledge import ocr_status
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 OK, WARN, FAIL, INFO = "ok", "warn", "fail", "info"
@@ -97,6 +98,17 @@ def check_tools(settings: Settings) -> list[dict]:
     out.append(item("pdftotext", "อ่าน PDF ในคลังความรู้", OK if shutil.which("pdftotext") else WARN,
                     "พบ pdftotext" if shutil.which("pdftotext") else "ไม่พบ pdftotext ค้นข้อความใน PDF ไม่ได้",
                     "" if shutil.which("pdftotext") else "สั่ง Build image ใหม่ (Dockerfile ติดตั้ง poppler-utils ให้)"))
+    ocr = ocr_status(settings)
+    label = "อ่าน PDF ที่เป็นภาพสแกน (OCR)"
+    if ocr["usable"]:
+        out.append(item("ocr", label, OK, f"พบ tesseract {ocr['version']} ภาษา {ocr['langs']} · ไฟล์ละไม่เกิน {ocr['max_pages']} หน้า"))
+    elif not ocr["enabled"]:
+        out.append(item("ocr", label, INFO, "ปิดอยู่ (OCR=false) PDF ที่เป็นภาพสแกนจะค้นไม่ได้"))
+    elif ocr["installed"]:
+        out.append(item("ocr", label, WARN, ocr["reason"], "ติดตั้งข้อมูลภาษาที่ขาด แล้ว Build image ใหม่ (ข้อ 7.1 ของคู่มือ)"))
+    else:
+        out.append(item("ocr", label, INFO, "ไม่ได้ติดตั้ง (ไม่บังคับ) PDF ที่เป็นภาพสแกนจะค้นไม่ได้ และ Claude ต้องอ่านจากภาพเอง",
+                        "สั่ง Build image ใหม่ Dockerfile ติดตั้ง tesseract พร้อมภาษาไทยให้ (ข้อ 7.1 ของคู่มือ)"))
     if not settings.allow_python:
         out.append(item("python", "Python ของ Claude", INFO, "ปิดอยู่ (ALLOW_PYTHON=false) งานคำนวณจะไม่รัน python3"))
         return out

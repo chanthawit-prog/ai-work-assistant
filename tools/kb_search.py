@@ -8,8 +8,9 @@
 
 The index is SQLite FTS5 with the trigram tokenizer, which matches any substring of 3 or more characters,
 so Thai (written without spaces between words) works without a word-segmentation dictionary. PDF text comes
-from `pdftotext` (poppler-utils). The dashboard keeps the index current; this command only reads it, from the
-file named by KB_INDEX. Standard library only, so it runs with any python3 and holds no memory between calls.
+from `pdftotext` (poppler-utils); pages that are images (scans) are read with tesseract when it is installed
+(ocr_text.py). The dashboard keeps the index current; this command only reads it, from the file named by
+KB_INDEX. Standard library only, so it runs with any python3 and holds no memory between calls.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ocr_text  # noqa: E402
 import xlsx_text  # noqa: E402
 
 VERSION = "1.0"
@@ -84,6 +86,8 @@ def connect(index: Path, readonly: bool = False) -> sqlite3.Connection:
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(path UNINDEXED, loc UNINDEXED, text,
                 tokenize='trigram');
         """)
+        if "ocr" not in {r[1] for r in conn.execute("PRAGMA table_info(docs)")}:
+            conn.execute("ALTER TABLE docs ADD COLUMN ocr INTEGER DEFAULT 0")  # pages read by OCR (an older index)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -114,12 +118,14 @@ def _docx_text(path: Path) -> str:
     return html.unescape("".join(out)).strip()
 
 
-def extract(path: Path) -> tuple[str, list[tuple[int, str]], str]:
-    """(kind, [(page or line, text)], note). The note says why nothing or little could be read."""
+def extract(path: Path, ocr=None, should_stop=None) -> tuple[str, list[tuple[int, str]], str, int]:
+    """(kind, [(page or line, text)], note, pages read by OCR). The note says why nothing or little could be
+    read. `ocr` is an ocr_text.OcrConfig: PDF pages that are images are then read with tesseract, and
+    `should_stop()` is asked between those pages (ocr_text.OcrStopped when it says yes)."""
     ext = path.suffix.lower()
     if ext == ".pdf":
         if not shutil.which("pdftotext"):
-            return "pdf", [], "อ่าน PDF ไม่ได้: ไม่พบโปรแกรม pdftotext (poppler-utils)"
+            return "pdf", [], "อ่าน PDF ไม่ได้: ไม่พบโปรแกรม pdftotext (poppler-utils)", 0
         proc = subprocess.run(["pdftotext", "-enc", "UTF-8", "-q", str(path), "-"], capture_output=True,
                               timeout=PDF_TIMEOUT)
         pages = proc.stdout.decode("utf-8", errors="replace").split("\f")
@@ -127,28 +133,40 @@ def extract(path: Path) -> tuple[str, list[tuple[int, str]], str]:
             pages.pop()
         text_chars = sum(len(p.strip()) for p in pages)
         if proc.returncode != 0 and not text_chars:
-            return "pdf", [], "อ่าน PDF ไม่ได้ (ไฟล์เสียหายหรือมีรหัสผ่าน)"
-        note = "แทบไม่มีข้อความ (น่าจะเป็นภาพสแกน ต้องทำ OCR ก่อนจึงจะค้นได้)" if text_chars < 40 * max(1, len(pages)) else ""
-        return "pdf", [(i, normalise(fix_pdf_thai(p))) for i, p in enumerate(pages, start=1) if p.strip()], note
+            return "pdf", [], "อ่าน PDF ไม่ได้ (ไฟล์เสียหายหรือมีรหัสผ่าน)", 0
+        note, read = "", 0
+        scant = ocr_text.scant_pages(pages)  # pages that are images
+        if scant:
+            ok, why = ocr_text.usable(ocr)
+            if ok:
+                result = ocr_text.ocr_pages(path, scant, ocr, total=len(pages), should_stop=should_stop)
+                for number, text in result.pages:
+                    pages[number - 1] = text
+                read, note = len(result.pages), result.note
+            elif len(scant) == len(pages):
+                note = f"แทบไม่มีข้อความ (ภาพสแกน) {why}"
+            else:
+                note = f"มี {len(scant)} หน้าที่เป็นภาพสแกน ซึ่งค้นไม่ได้ {why}"
+        return "pdf", [(i, normalise(fix_pdf_thai(p))) for i, p in enumerate(pages, start=1) if p.strip()], note, read
     if ext == ".docx":
         try:
             text = _docx_text(path)
         except (zipfile.BadZipFile, KeyError, ValueError):
-            return "docx", [], "อ่านไฟล์ Word ไม่ได้ (เสียหาย หรือใหญ่ผิดปกติเมื่อแตกไฟล์)"
-        return "docx", [(1, normalise(text))], ""
+            return "docx", [], "อ่านไฟล์ Word ไม่ได้ (เสียหาย หรือใหญ่ผิดปกติเมื่อแตกไฟล์)", 0
+        return "docx", [(1, normalise(text))], "", 0
     if ext in EXCEL_EXTS:
         try:
             sheets = xlsx_text.read_workbook(path)
         except xlsx_text.XlsxError:
-            return "xlsx", [], "อ่านไฟล์ Excel ไม่ได้"
+            return "xlsx", [], "อ่านไฟล์ Excel ไม่ได้", 0
         pages = []
         for sheet in sheets:  # one line per row, "[แถว 12] a | b | c", so a match shows its row
             lines = [f"[แถว {n}] " + " | ".join(values) for n, values in sheet["rows"]]
             if lines:
                 pages.append((sheet["name"] + (" (ชีตซ่อน)" if sheet["hidden"] else ""), normalise("\n".join(lines))))
         note = "; ".join(f"ชีต {s['name']} ยาวเกิน {xlsx_text.MAX_ROWS:,} แถว ทำดัชนีเฉพาะส่วนต้น" for s in sheets if s["truncated"])
-        return "xlsx", pages, note
-    return "text", [(1, normalise(_read_text(path)))], ""
+        return "xlsx", pages, note, 0
+    return "text", [(1, normalise(_read_text(path)))], "", 0
 
 
 def _sheet_passages(pages: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -212,9 +230,10 @@ def candidates(roots: dict[str, Path]):
                 yield name, rel.as_posix(), path
 
 
-def refresh(index: Path, roots: dict[str, Path], should_stop=None) -> dict:
-    """Index new and changed files, drop deleted ones. `should_stop()` is asked between files, so a job that
-    starts (or RAM that runs short) pauses the work; the next refresh carries on where this one stopped."""
+def refresh(index: Path, roots: dict[str, Path], should_stop=None, ocr=None) -> dict:
+    """Index new and changed files, drop deleted ones. `should_stop()` is asked between files (and between
+    OCR pages), so a job that starts (or RAM that runs short) pauses the work; the next refresh carries on
+    where this one stopped. `ocr` (ocr_text.OcrConfig) lets scanned pages be read with tesseract."""
     stats = {"added": 0, "updated": 0, "removed": 0, "unchanged": 0, "errors": 0, "stopped": False}
     conn = connect(index)
     try:
@@ -230,13 +249,16 @@ def refresh(index: Path, roots: dict[str, Path], should_stop=None) -> dict:
             if should_stop and should_stop():
                 stats["stopped"] = True
                 break
-            note, kind, parts = "", "text", []
+            note, kind, parts, read = "", "text", [], 0
             if st.st_size > MAX_FILE_BYTES:
                 note = f"ไฟล์ใหญ่เกิน {MAX_FILE_BYTES // 1024 // 1024} MB จึงไม่ได้ทำดัชนี"
             else:
                 try:
-                    kind, pages, note = extract(path)
+                    kind, pages, note, read = extract(path, ocr=ocr, should_stop=should_stop)
                     parts = passages(kind, pages)
+                except ocr_text.OcrStopped:  # the pages read so far are cached; this file is finished next time
+                    stats["stopped"] = True
+                    break
                 except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
                     note, stats["errors"] = f"อ่านไฟล์ไม่ได้: {exc}", stats["errors"] + 1
             with conn:
@@ -244,9 +266,11 @@ def refresh(index: Path, roots: dict[str, Path], should_stop=None) -> dict:
                 conn.executemany("INSERT INTO chunks (path, loc, text) VALUES (?, ?, ?)",
                                  [(key, loc, text) for loc, text in parts])
                 units = len({loc for loc, _ in parts}) if kind == "xlsx" else max((loc for loc, _ in parts), default=0)
-                conn.execute("INSERT OR REPLACE INTO docs VALUES (?,?,?,?,?,?,?,?,?,?)",
+                conn.execute("INSERT OR REPLACE INTO docs (path, root, rel, size, mtime_ns, kind, units, chars, note, "
+                             "indexed_at, ocr) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                              (key, root, rel, st.st_size, st.st_mtime_ns, kind, units,
-                              sum(len(t) for _, t in parts), note, datetime.now().astimezone().isoformat(timespec="seconds")))
+                              sum(len(t) for _, t in parts), note, datetime.now().astimezone().isoformat(timespec="seconds"),
+                              read))
             stats["updated" if key in known else "added"] += 1
         if not stats["stopped"]:
             scanned = {name for name, root in roots.items() if root.is_dir()}  # a missing volume must not wipe it
@@ -271,17 +295,22 @@ def status(index: Path) -> dict:
     try:
         conn = connect(index, readonly=True)
     except SearchError:
-        return {"files": 0, "chunks": 0, "by_kind": {}, "by_root": {}, "notes": [], "updated_at": None}
+        return {"files": 0, "chunks": 0, "by_kind": {}, "by_root": {}, "notes": [], "updated_at": None,
+                "ocr_files": 0, "ocr_pages": 0}
     try:
         meta = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
-        rows = conn.execute("SELECT root, kind, note, path FROM docs").fetchall()
+        try:
+            rows = conn.execute("SELECT root, kind, note, path, ocr FROM docs").fetchall()
+        except sqlite3.OperationalError:  # an index from before OCR, not yet refreshed by the writer
+            rows = conn.execute("SELECT root, kind, note, path, 0 AS ocr FROM docs").fetchall()
         by_kind, by_root = {}, {}
         for r in rows:
             by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
             by_root[r["root"]] = by_root.get(r["root"], 0) + 1
         return {"files": len(rows), "chunks": conn.execute("SELECT count(*) FROM chunks").fetchone()[0],
                 "by_kind": by_kind, "by_root": by_root, "updated_at": meta.get("updated_at"),
-                "notes": [{"path": r["path"], "note": r["note"]} for r in rows if r["note"]][:50]}
+                "notes": [{"path": r["path"], "note": r["note"]} for r in rows if r["note"]][:50],
+                "ocr_files": sum(1 for r in rows if r["ocr"]), "ocr_pages": sum(r["ocr"] or 0 for r in rows)}
     finally:
         conn.close()
 

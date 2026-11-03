@@ -2,11 +2,13 @@
 
 Claude Code reads text, PDF and images directly. Word files (.docx, e.g. a Teams transcript) are
 zip archives, so we extract their text into a .txt file next to the original. Excel workbooks (.xlsx,
-e.g. a customer's BOQ) become one CSV per sheet, "<name> - <sheet>.csv".
+e.g. a customer's BOQ) become one CSV per sheet, "<name> - <sheet>.csv". A PDF whose pages are images
+(a scanned quotation or drawing title block) gets its OCR text in "<name>.ocr.txt" when tesseract is installed.
 """
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -15,6 +17,7 @@ from xml.etree import ElementTree
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
+import ocr_text  # noqa: E402  (shared with the knowledge index)
 import xlsx_text  # noqa: E402  (shared with the knowledge index and with Claude's own python3 runs)
 
 from .store import safe_filename  # noqa: E402
@@ -79,9 +82,38 @@ def excel_to_csv(path: Path) -> tuple[list[str], list[str]]:
     return written, warnings
 
 
-def prepare_inputs(input_dir: Path) -> list[str]:
-    """Convert .docx to .txt and .xlsx to CSV per sheet (once each). Returns warnings for files Claude
-    cannot read."""
+def ocr_pdf_input(path: Path, ocr, progress=None) -> tuple[list[str], list[str]]:
+    """Write "<stem>.ocr.txt" next to a PDF whose pages are images. Returns (files written, warnings)."""
+    texts = ocr_text.page_texts(path)
+    scant = ocr_text.scant_pages(texts)
+    if not texts or not scant:
+        return [], []
+    ok, why = ocr_text.usable(ocr)
+    if not ok:
+        return [], [f"{path.name} เป็นภาพสแกน {len(scant)} หน้า {why} Claude จะอ่านจากภาพเอง (ตัวเลขอาจคลาดเคลื่อน)"]
+    count = min(len(scant), max(1, ocr.max_pages))
+    if progress:
+        progress(f"อ่านไฟล์สแกน {path.name} ด้วย OCR {count} หน้า อาจใช้เวลาหลายนาที")
+    result = ocr_text.ocr_pages(path, scant, ocr, total=len(texts))
+    target = _free_name(path.parent, safe_filename(f"{path.stem}.ocr.txt"))
+    target.write_text(ocr_text.as_text(path.name, result), encoding="utf-8")
+    warnings = []
+    if result.skipped:
+        warnings.append(f"{path.name} มี {result.total} หน้า อ่านด้วย OCR เฉพาะ {len(result.pages)} หน้าแรก "
+                        f"(เพิ่ม OCR_MAX_PAGES ในไฟล์ .env ถ้าต้องการทั้งหมด)")
+    if not result.pages:
+        warnings.append(f"{path.name}: OCR ไม่พบข้อความในภาพ (หน้าว่างหรือภาพไม่ชัด)")
+    if progress:
+        source = f" (จากที่อ่านไว้แล้ว {result.from_cache} หน้า)" if result.from_cache else ""
+        progress(f"อ่าน {path.name} ด้วย OCR แล้ว {len(result.pages)} หน้า ใช้เวลา {result.seconds:.0f} วินาที{source} "
+                 f"ข้อความอยู่ใน {target.name}")
+    return [target.name], warnings
+
+
+def prepare_inputs(input_dir: Path, ocr=None, progress=None) -> list[str]:
+    """Convert .docx to .txt, .xlsx to CSV per sheet and scanned PDFs to OCR text (once each). Returns
+    warnings for files Claude cannot read. `ocr` is an ocr_text.OcrConfig (None: no OCR); `progress(text)`
+    is told about OCR work, which can take minutes."""
     warnings = []
     if not input_dir.exists():
         return warnings
@@ -112,6 +144,21 @@ def prepare_inputs(input_dir: Path) -> list[str]:
             changed = True
         elif ext == ".xls":
             warnings.append(f"{path.name} เป็น Excel รุ่นเก่า (.xls) Claude อ่านไม่ได้ ให้บันทึกเป็น .xlsx หรือ CSV แล้วแนบใหม่")
+        elif ext == ".pdf" and ocr is not None:
+            stamp = [path.stat().st_size, path.stat().st_mtime_ns]
+            previous = done.get(path.name) or {}
+            if previous.get("stamp") == stamp:
+                continue
+            for old in previous.get("outputs", []):  # a new version of the file replaces our old text
+                (input_dir / old).unlink(missing_ok=True)
+            try:
+                written, notes = ocr_pdf_input(path, ocr, progress)
+            except (OSError, subprocess.SubprocessError, ocr_text.OcrStopped) as exc:
+                warnings.append(f"อ่านไฟล์ {path.name} ด้วย OCR ไม่สำเร็จ: {exc}")
+                continue
+            warnings += notes
+            done[path.name] = {"stamp": stamp, "outputs": written}
+            changed = True
         elif ext == ".docx":
             target = path.with_suffix(".txt")
             if not target.exists():

@@ -34,6 +34,7 @@ from pathlib import Path
 from . import customers, sysmon
 from .config import Settings
 from .convert import prepare_inputs
+from .knowledge import ocr_config
 from .events import RunMeta, summarize
 from .jobtypes import JOB_TYPES, JobType
 from .prompts import system_prompt, task_message
@@ -273,7 +274,8 @@ class Runner:
 
         # file work in a thread: converting a big workbook or copying a customer's history must not freeze the
         # dashboard and the other loops (the Docker healthcheck would restart the container)
-        warnings = await asyncio.to_thread(prepare_inputs, job_dir / "input")
+        warnings = await asyncio.to_thread(prepare_inputs, job_dir / "input", ocr_config(self.settings),
+                                           lambda text: self._step(job_id, run_no, "app", text))
         inputs = [f["path"] for f in self.store.list_files(job_id, "input")]
         context = await asyncio.to_thread(self.prepare_context, job, job_type)
         prompt = task_message(job, job_type, self.settings, inputs, context, feedback=feedback, resumed=bool(resume),

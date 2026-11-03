@@ -65,6 +65,9 @@ class Settings:
     library_docx: bool = True               # approving also saves a Word copy of the result in the library
     kb_enabled: bool = True                 # full-text index of knowledge/ (PDF, Word, text) and approved outputs
     kb_refresh_min: int = 30                # how often to look for new or changed files (only while idle)
+    ocr_enabled: bool = True                # scanned PDFs (knowledge and job inputs) read with tesseract when installed
+    ocr_langs: str = "tha+eng"              # tesseract models, "+"-joined
+    ocr_max_pages: int = 40                 # image pages read per file (a 40-page scan takes a few minutes on a NAS)
 
     @property
     def report_template(self) -> Path:
@@ -152,4 +155,7 @@ class Settings:
             library_docx=_bool("LIBRARY_DOCX", True),
             kb_enabled=_bool("KB_SEARCH", True),
             kb_refresh_min=_int("KB_REFRESH_MIN", 30),
+            ocr_enabled=_bool("OCR", True),
+            ocr_langs=(os.environ.get("OCR_LANGS", "").strip().lower() or "tha+eng"),
+            ocr_max_pages=_int("OCR_MAX_PAGES", 40),
         )

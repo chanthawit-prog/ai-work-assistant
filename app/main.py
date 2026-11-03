@@ -29,7 +29,7 @@ from .convert import READABLE_EXTS, prepare_inputs
 from .export_docx import action_items_markdown, markdown_to_docx
 from .handoff import HANDOFF_TYPES, default_files, handoff
 from .jobtypes import EFFORTS, JOB_TYPES
-from .knowledge import KnowledgeIndex, kb_search
+from .knowledge import KnowledgeIndex, kb_search, ocr_status
 from .mail import Mailer, drafted_message, find_emails, split_addresses
 from .notify import Notifier
 from .readiness import run_checks
@@ -43,7 +43,7 @@ from .tasks import TaskStore
 from .today import DigestScheduler, summary as today_summary
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
@@ -823,7 +823,8 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     async def knowledge_status():
         info = await asyncio.to_thread(knowledge.status)
         return {**info, "enabled": settings.kb_enabled, "running": knowledge.running, "last": knowledge.last,
-                "pdftotext": shutil.which("pdftotext") is not None, "refresh_min": settings.kb_refresh_min}
+                "pdftotext": shutil.which("pdftotext") is not None, "refresh_min": settings.kb_refresh_min,
+                "ocr": await asyncio.to_thread(ocr_status, settings)}
 
     @app.get("/api/knowledge/search")
     async def knowledge_search(q: str = "", limit: int = 10, within: str = ""):

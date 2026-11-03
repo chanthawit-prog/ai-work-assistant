@@ -22,9 +22,26 @@ TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 import kb_search  # noqa: E402  (tools/ is plain scripts, shared with Claude's own python3 runs)
+import ocr_text  # noqa: E402
 
 log = logging.getLogger("assistant.knowledge")
 FIRST_DELAY = 60  # seconds after start, so the dashboard and any waiting job come first
+
+
+def ocr_config(settings: Settings) -> ocr_text.OcrConfig:
+    """How scanned pages are read, for the index and for job inputs; the cache is shared by both."""
+    return ocr_text.OcrConfig(enabled=settings.ocr_enabled, langs=settings.ocr_langs, max_pages=settings.ocr_max_pages,
+                              cache_dir=settings.state_dir / "ocr")
+
+
+def ocr_status(settings: Settings) -> dict:
+    """For the System page and the readiness check: whether OCR can run here, and with what."""
+    config = ocr_config(settings)
+    ok, why = ocr_text.usable(config)
+    info = ocr_text.tools()
+    return {"enabled": settings.ocr_enabled, "usable": ok, "reason": why, "installed": info["tesseract"],
+            "version": info["version"], "installed_langs": info["langs"], "langs": settings.ocr_langs,
+            "max_pages": settings.ocr_max_pages}
 
 
 class KnowledgeIndex:
@@ -66,7 +83,8 @@ class KnowledgeIndex:
             return None
         self.running = True
         try:
-            stats = await asyncio.to_thread(kb_search.refresh, self.path, self.roots, self.busy)
+            stats = await asyncio.to_thread(kb_search.refresh, self.path, self.roots, self.busy,
+                                            ocr_config(self.settings))
             self.last = {**stats, "at": now_iso()}
             if stats["added"] or stats["updated"] or stats["removed"]:
                 log.info("knowledge index: %s", stats)

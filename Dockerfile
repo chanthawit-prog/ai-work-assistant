@@ -11,9 +11,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MALLOC_ARENA_MAX=2 \
     TZ=Asia/Bangkok
 
-# poppler-utils: pdftotext, so PDFs in the knowledge folder can be searched (runs only while indexing)
+# poppler-utils: pdftotext and pdftoppm, so PDFs in the knowledge folder can be searched (runs only while indexing)
+# tesseract + Thai and English models (about 40 MB): OCR for PDFs that are scans, used while indexing and when
+# a job's files are prepared; one page at a time, two threads, so a 6 GB NAS stays usable
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-venv tini ca-certificates tzdata ripgrep poppler-utils \
+      tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code, installed unmodified from Anthropic's npm package (current versions install the native
