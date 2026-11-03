@@ -869,6 +869,7 @@ function showJob(id) {
     }
     job = data.job;
     jobPage.handoff = data.handoff;
+    jobPage.mail = !!data.email; // the dashboard can send mail (MAIL_* in .env), known with the job, not a race with /api/status
     const levels = `${(data.type && data.type.effort) || ""}|${(job.params && job.params.effort) || ""}`;
     if (levels !== effortSig) { // the job's level, until you pick another one for the next message
       effortSig = levels;
@@ -932,6 +933,9 @@ function renderThread(steps, job, openGroups, autoscroll = false) {
       const ic = st.level === "ok" ? "check" : st.level === "error" ? "x" : "alert";
       items.push(`<li class="status-line ${esc(st.level)}">${icon(ic)}${esc(st.text)}${
         st.detail ? `<span class="status-detail">· ${esc(st.detail)}</span>` : ""}</li>`);
+    } else if (st.kind === "email") {
+      group = null;
+      items.push(`<li class="status-line edit">${icon("mail")}${esc(st.text)}<span class="status-detail">· ${esc(fmtClock(st.t))}</span></li>`);
     } else if (st.kind === "edit") {
       group = null;
       items.push(`<li class="status-line edit">${icon("pencil")}${esc(st.text)}<span class="status-detail">· ${esc(fmtClock(st.t))}</span></li>`);
@@ -1028,6 +1032,10 @@ function renderJobHead(job) {
       r.tasks_added ? ` · เพิ่ม ${r.tasks_added} รายการเข้า <a href="#/tasks">ติดตามงาน</a>` : ""}${
       r.archived && r.archived.length ? `<br>เก็บไว้ที่ <code>${r.archived.map(esc).join(", ")}</code>` : ""}</span></p>`);
   }
+  if (job.emails && job.emails.length) {
+    const e = job.emails[job.emails.length - 1];
+    notices.push(`<p class="notice ok">${icon("mail")}<span>ส่งอีเมลแล้ว ${job.emails.length} ครั้ง ล่าสุด ${esc(fmtTime(e.at))} ถึง ${esc((e.to || []).join(", "))}</span></p>`);
+  }
   const meta = [
     job.type_label,
     `สร้าง ${fmtTime(job.created_at)}`,
@@ -1046,6 +1054,7 @@ function renderJobHead(job) {
   if (job.handoffs && job.handoffs.length) links.push(`<span>งานต่อเนื่อง ${job.handoffs.map(jobLink).join('<span class="sep">·</span>')}</span>`);
 
   const actions = [];
+  if (job.status === "done" && jobPage.mail) actions.push(`<button type="button" class="btn" data-act="email" aria-expanded="false" aria-controls="handoff">${icon("mail")}ส่งอีเมล</button>`);
   if (job.status === "needs_review" || job.status === "done") actions.push(`<button type="button" class="btn" data-act="handoff" aria-expanded="false" aria-controls="handoff">${icon("forward")}ทำงานต่อ</button>`);
   if (job.status === "needs_review") actions.push(`<button type="button" class="btn primary" data-act="approve">${icon("check")}อนุมัติผลงาน</button>`);
   if (job.status === "failed" || job.status === "cancelled") actions.push(`<button type="button" class="btn" data-act="retry">${icon("retry")}ลองใหม่ตั้งแต่ต้น</button>`);
@@ -1085,6 +1094,7 @@ function renderJobHead(job) {
     if (act === "keep") return renderJobHead(job);
     if (act === "approve" && unsaved()) return toast("บันทึกหรือยกเลิกที่แก้ไว้ก่อน แล้วค่อยอนุมัติ", "bad");
     if (act === "handoff") return openHandoff(job, btn);
+    if (act === "email") return openEmailForm(job, btn);
     btn.disabled = true;
     try {
       if (act === "approve") {
@@ -1113,15 +1123,22 @@ function renderJobHead(job) {
 }
 
 /* what the job page poll knows that the head's buttons need */
-const jobPage = { handoff: null, outputs: [], inputs: [] };
+const jobPage = { handoff: null, outputs: [], inputs: [], mail: false };
+
+/* the hand-off and email forms share one holder under the actions: opening one closes the other */
+function closeHolder() {
+  const holder = $("#handoff");
+  if (!holder) return;
+  holder.innerHTML = "";
+  holder.dataset.form = "";
+  $$("[aria-controls=handoff]").forEach((b) => b.setAttribute("aria-expanded", "false"));
+}
 
 async function openHandoff(job, btn) {
   const holder = $("#handoff");
-  if (holder.innerHTML) { // second click closes it
-    holder.innerHTML = "";
-    btn.setAttribute("aria-expanded", "false");
-    return;
-  }
+  const wasOpen = holder.dataset.form === "handoff";
+  closeHolder();
+  if (wasOpen) return; // second click closes it
   if (unsaved()) return toast("บันทึกที่แก้ไว้ในผลลัพธ์ก่อน งานใหม่จะได้ไฟล์ฉบับที่บันทึกแล้ว", "bad");
   const info = jobPage.handoff;
   if (!info) return toast("ส่งต่อได้เมื่องานนี้มีผลลัพธ์แล้ว", "bad");
@@ -1130,6 +1147,7 @@ async function openHandoff(job, btn) {
   const presets = HANDOFF_PRESETS[job.type] || HANDOFF_PRESETS.general;
   const files = jobPage.outputs.map((f) => f.path);
   btn.setAttribute("aria-expanded", "true");
+  holder.dataset.form = "handoff";
   holder.innerHTML = `
     <form class="schedule-form handoff-form" id="handoffForm" novalidate>
       <h2>ทำงานต่อจากผลนี้</h2>
@@ -1177,10 +1195,7 @@ async function openHandoff(job, btn) {
     $("#hInstr").focus();
   }));
   choose(presets[0]);
-  $("#hCancel").onclick = () => {
-    holder.innerHTML = "";
-    btn.setAttribute("aria-expanded", "false");
-  };
+  $("#hCancel").onclick = closeHolder;
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const type = types.find((x) => x.id === form.elements.hType.value);
@@ -1220,6 +1235,69 @@ async function openHandoff(job, btn) {
   });
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   holder.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+}
+
+/* email an approved result: the Word file attached, the drafted message prefilled; nothing goes without your confirm */
+async function openEmailForm(job, btn) {
+  const holder = $("#handoff");
+  const wasOpen = holder.dataset.form === "email";
+  closeHolder();
+  if (wasOpen) return; // second click closes it
+  let pre;
+  try {
+    pre = await api(`/api/jobs/${encodeURIComponent(job.id)}/email`);
+  } catch (err) {
+    return toast(err.message, "bad");
+  }
+  if (!$("#handoff")) return;
+  holder.dataset.form = "email";
+  btn.setAttribute("aria-expanded", "true");
+  holder.innerHTML = `
+    <form class="schedule-form handoff-form" id="emailForm" novalidate>
+      <h2>ส่งอีเมล</h2>
+      <p class="small muted">ส่งจาก ${esc(pre.sender)} · ตรวจข้อความและไฟล์แนบให้เรียบร้อยก่อนกดส่ง ระบบไม่ส่งอะไรเองโดยคุณไม่กด</p>
+      <div class="field"><label for="mTo">ถึง</label>
+        <input id="mTo" type="text" autocomplete="off" placeholder="คั่นหลายที่อยู่ด้วยเครื่องหมายจุลภาค"></div>
+      <div class="field"><label for="mCc">สำเนา (Cc)</label><input id="mCc" type="text" autocomplete="off"></div>
+      <div class="field"><label for="mSubject">หัวข้อ</label><input id="mSubject" type="text" maxlength="200"></div>
+      <div class="field"><label for="mBody">ข้อความ</label><textarea id="mBody" rows="10"></textarea></div>
+      <div class="field"><span class="label">ไฟล์แนบ</span>${pre.attachments.map((f) => `<label class="check-option">
+        <input type="checkbox" name="mFile" value="${esc(f.path)}" ${f.default ? "checked" : ""}> ${esc(f.name)}
+        <span class="muted small">${(f.size / 1024).toFixed(0)} KB</span></label>`).join("") || `<p class="muted small">ไม่มีไฟล์ให้แนบ</p>`}</div>
+      ${pre.sent.length ? `<p class="small muted">งานนี้ส่งอีเมลไปแล้ว ${pre.sent.length} ครั้ง ล่าสุด ${esc(fmtTime(pre.sent[pre.sent.length - 1].at))}</p>` : ""}
+      <div class="form-actions">
+        <button type="submit" class="btn primary" id="mSend">${icon("mail")}ส่งอีเมล</button>
+        <button type="button" class="btn quiet" id="mCancel">ยกเลิก</button>
+      </div>
+    </form>`;
+  $("#mTo").value = pre.to.join(", ");
+  $("#mSubject").value = pre.subject;
+  $("#mBody").value = pre.body;
+  const close = closeHolder;
+  $("#mCancel").onclick = close;
+  $("#emailForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const to = $("#mTo").value.trim();
+    if (!to) { toast("ใส่ที่อยู่ผู้รับก่อน", "bad"); return $("#mTo").focus(); }
+    if (!$("#mSubject").value.trim()) { toast("ใส่หัวข้อก่อน", "bad"); return $("#mSubject").focus(); }
+    const files = $$("input[name=mFile]:checked").map((c) => c.value);
+    if (!confirm(`ส่งอีเมลถึง ${to}${files.length ? ` พร้อมไฟล์แนบ ${files.length} ไฟล์` : " โดยไม่มีไฟล์แนบ"} ใช่ไหม?`)) return;
+    const send = $("#mSend");
+    send.disabled = true;
+    send.classList.add("busy");
+    try {
+      const r = await postJSON(`/api/jobs/${encodeURIComponent(job.id)}/email`, {
+        to, cc: $("#mCc").value.trim(), subject: $("#mSubject").value.trim(), body: $("#mBody").value, attachments: files });
+      toast(`ส่งอีเมลถึง ${r.sent.to.join(", ")} แล้ว`);
+      close();
+    } catch (err) {
+      toast(err.message, "bad");
+      send.disabled = false;
+      send.classList.remove("busy");
+    }
+  });
+  $("#mTo").focus();
+  holder.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
 }
 
 function actionItemsTable(items) {
@@ -2165,6 +2243,12 @@ async function showSystem() {
       <button type="button" class="btn" id="sysDigest">${icon("calendar")}ส่งสรุปวันนี้ตอนนี้</button></div>`
       : `<p class="small muted">ตั้งค่า NOTIFY_SYNOLOGY_CHAT_URL, NOTIFY_LINE_TOKEN + NOTIFY_LINE_TO หรือ NOTIFY_WEBHOOK_URL ในไฟล์ .env แล้วสั่ง Build ใหม่</p>`}</section>
 
+    <section class="sys-section"><h2>ส่งอีเมลจาก dashboard</h2><dl class="facts">
+      ${row("สถานะ", s.mail.configured ? `<span class="badge s-done">ตั้งค่าแล้ว</span> ${esc(s.mail.host)}:${esc(String(s.mail.port))} (${esc(s.mail.security)}) จาก ${esc(s.mail.sender)}`
+        : `<span class="muted">ยังไม่ได้ตั้งค่า ตั้ง MAIL_SMTP_HOST, MAIL_FROM และบัญชีในไฟล์ .env แล้ว Build ใหม่ (ข้อ 8.2 ของคู่มือ)</span>`)}
+      ${s.mail.configured ? row("สำเนาทุกฉบับถึง", s.mail.bcc ? esc(s.mail.bcc) : `<span class="muted">ไม่มี (ตั้ง MAIL_BCC เพื่อเก็บสำเนาที่ส่งทุกฉบับ)</span>`) : ""}
+    </dl>${s.mail.configured ? `<button type="button" class="btn" id="sysMail">${icon("mail")}ส่งอีเมลทดสอบถึงตัวเอง</button>` : ""}</section>
+
     <section class="sys-section"><h2>การทำงาน</h2><dl class="facts">
       ${row("ทำพร้อมกันสูงสุด", `${s.worker.max} งาน`)}
       ${row("หมดเวลาต่องาน", `${s.worker.timeout_min} นาที`)}
@@ -2204,6 +2288,15 @@ async function showSystem() {
       toast(failed.length ? `ส่งไม่สำเร็จ: ${failed.map(([k, v]) => `${CHANNELS[k] || k} (${v})`).join(", ")}` : "ส่งสรุปวันนี้แล้ว", failed.length ? "bad" : "");
     } catch (err) { toast(err.message, "bad"); }
     digestBtn.disabled = false;
+  });
+  const mailBtn = $("#sysMail");
+  if (mailBtn) mailBtn.addEventListener("click", async () => {
+    mailBtn.disabled = true;
+    try {
+      const r = await postJSON("/api/mail/test");
+      toast(`ส่งอีเมลทดสอบถึง ${r.to.join(", ")} แล้ว`);
+    } catch (err) { toast(err.message, "bad"); }
+    mailBtn.disabled = false;
   });
   const notifyBtn = $("#sysNotify");
   if (notifyBtn) notifyBtn.addEventListener("click", async () => {

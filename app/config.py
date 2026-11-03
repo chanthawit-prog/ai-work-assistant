@@ -37,6 +37,15 @@ class Settings:
     followup_time: str = "08:00"
     followup_days: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri")
     digest_time: str = ""                  # morning summary through the notification channels ("" = off), e.g. 07:30
+    # Sending approved results by email from the dashboard (MAIL_*). Empty host = the button is not shown.
+    mail_host: str = ""
+    mail_port: int = 587
+    mail_security: str = "starttls"        # starttls | ssl | none
+    mail_user: str = ""
+    mail_password: str = ""
+    mail_from: str = ""
+    mail_from_name: str = ""
+    mail_bcc: str = ""                     # a copy of every email sent, e.g. your own address
     allow_python: bool = True
     dashboard_user: str = "admin"
     dashboard_password: str = ""
@@ -117,6 +126,14 @@ class Settings:
             followup_time=os.environ.get("FOLLOWUP_TIME", "08:00").strip(),
             followup_days=days,
             digest_time=os.environ.get("DIGEST_TIME", "").strip(),
+            mail_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
+            mail_port=_int("MAIL_SMTP_PORT", 587),
+            mail_security=(os.environ.get("MAIL_SMTP_SECURITY", "starttls").strip().lower() or "starttls"),
+            mail_user=os.environ.get("MAIL_SMTP_USER", "").strip(),
+            mail_password=os.environ.get("MAIL_SMTP_PASSWORD", ""),
+            mail_from=os.environ.get("MAIL_FROM", "").strip(),
+            mail_from_name=os.environ.get("MAIL_FROM_NAME", "").strip(),
+            mail_bcc=os.environ.get("MAIL_BCC", "").strip(),
             allow_python=_bool("ALLOW_PYTHON", True),
             dashboard_user=os.environ.get("DASHBOARD_USER", "admin").strip() or "admin",
             dashboard_password=os.environ.get("DASHBOARD_PASSWORD", ""),

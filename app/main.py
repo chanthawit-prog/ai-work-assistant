@@ -30,6 +30,7 @@ from .export_docx import action_items_markdown, markdown_to_docx
 from .handoff import HANDOFF_TYPES, default_files, handoff
 from .jobtypes import EFFORTS, JOB_TYPES
 from .knowledge import KnowledgeIndex, kb_search
+from .mail import Mailer, drafted_message, find_emails, split_addresses
 from .notify import Notifier
 from .readiness import run_checks
 from .review import EDITABLE_EXTS, approve, file_sha, save_edit, slugify
@@ -37,12 +38,12 @@ from .runner import MESSAGE_STATUSES, Runner
 from .schedules import INCLUDES, ScheduleStore, next_run, schedulable_types
 from .schedules import create_job as create_scheduled_job
 from .state import RuntimeState
-from .store import AREAS, JOB_ID_RE, TRASH_DAYS, JobStore, now_iso, read_json, revision
+from .store import AREAS, DONE, JOB_ID_RE, TRASH_DAYS, JobStore, now_iso, read_json, revision
 from .tasks import TaskStore
 from .today import DigestScheduler, summary as today_summary
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.11.1"
+APP_VERSION = "0.12.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
@@ -100,6 +101,14 @@ class HandoffIn(BaseModel):
     effort: str = ""             # low | medium | high | max; empty or "auto": the new job type's default
     files: list[str] = []        # output files to pass on; empty: the job type's main outputs
     inputs: list[str] = []       # files attached to the original job to pass on as well (a photo, the transcript)
+
+
+class EmailIn(BaseModel):
+    to: str | list[str] = ""
+    cc: str | list[str] = ""
+    subject: str = ""
+    body: str = ""
+    attachments: list[str] = []  # "library/<type>/<file>" of this job's approval, or "output/<file>"
 
 
 class EditIn(BaseModel):
@@ -286,6 +295,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     tasks = TaskStore(settings.tasks_file)
     state = RuntimeState(settings.state_dir / "runtime.json")
     notifier = Notifier(settings)
+    mailer = Mailer(settings)
     runner = Runner(store, tasks, state, settings, notifier=notifier)
     knowledge = KnowledgeIndex(settings, runner)
     runner.kb = knowledge
@@ -361,6 +371,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     app.state.settings, app.state.store, app.state.runner, app.state.runtime = settings, store, runner, state
     app.state.tasks, app.state.inbox, app.state.scheduler, app.state.notifier = tasks, inbox, scheduler, notifier
     app.state.schedules, app.state.recurring, app.state.knowledge = schedules, recurring, knowledge
+    app.state.mailer = mailer
     if settings.dashboard_password:
         app.add_middleware(BasicAuth, user=settings.dashboard_user, password=settings.dashboard_password)
     app.add_middleware(UploadLimit, max_bytes=max_upload, message=too_large)
@@ -407,6 +418,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             view.update(origin=linked(params["from_job"], params.get("from_title", "")) if params.get("from_job") else None,
                         handoffs=[linked(h.get("job_id")) for h in job.get("handoffs") or []])
             view.update(warnings=job.get("warnings") or [], runs=runs, edits=job.get("edits") or [],
+                        emails=job.get("emails") or [],
                         can_message=job.get("status") in MESSAGE_STATUSES)
         return view
 
@@ -430,7 +442,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             "open_tasks": len(tasks.open_items()),
             "followup": {"time": settings.followup_time, "days": list(settings.followup_days)},
             "memory": memory_summary(),
-            "limits": {"max_upload_mb": settings.max_upload_mb},
+            "limits": {"max_upload_mb": settings.max_upload_mb, "mail": mailer.configured},
             "server_time": now_iso(),
         }
 
@@ -514,6 +526,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             "job": job_view(job),
             "type": job_type.to_dict() if job_type else None,
             "handoff": {"types": list(HANDOFF_TYPES), "files": default_files(store, job)} if can_handoff else None,
+            "email": mailer.configured,  # the "ส่งอีเมล" button, once the job is approved
             "steps": steps,
             "next": total,
             "partial_text": runner.partial.get(job_id),
@@ -610,6 +623,85 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             "Content-Disposition": f"attachment; filename=\"export.docx\"; filename*=UTF-8''{quote(filename)}"})
 
     # -- system & notifications ---------------------------------------------------
+    # -- email an approved result -----------------------------------------------
+    def email_attachment_path(job: dict, rel: str) -> Path:
+        """"library/<type>/<file>" from this job's approval, or "output/<file>" of this job; nothing else."""
+        if rel.startswith("library/"):
+            if rel not in ((job.get("review") or {}).get("archived") or []):
+                raise KeyError(rel)
+            path = customers.library_path(settings, rel)
+        elif rel.startswith("output/"):
+            path = store.file_path(job["id"], "output", rel[len("output/"):])
+        else:
+            raise KeyError(rel)
+        if path is None or not path.is_file():
+            raise KeyError(rel)
+        return path
+
+    @app.get("/api/jobs/{job_id}/email")
+    async def email_prefill(job_id: str):
+        """What the email form starts with: the customer's address, the drafted message, the files to attach."""
+        job = store.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        job_type = JOB_TYPES.get(job["type"])
+        draft = {"subject": "", "body": ""}
+        if job_type:
+            primary = store.job_dir(job_id) / job_type.primary_output
+            if primary.is_file() and primary.suffix.lower() in (".md", ".txt"):
+                draft = drafted_message(primary.read_text("utf-8", errors="replace"))
+        to: list[str] = []
+        customer = (job.get("params") or {}).get("customer")
+        folder = customers.folders(settings.knowledge_dir).get(customers.key(customer)) if customer else None
+        if folder is not None:
+            for name in customers.PROFILE_NAMES:
+                if (folder / name).is_file():
+                    to = find_emails((folder / name).read_text("utf-8", errors="replace"))
+                    break
+        files = []
+        for rel in (job.get("review") or {}).get("archived") or []:
+            path = customers.library_path(settings, rel)
+            if path is not None and path.is_file():
+                files.append({"path": rel, "name": path.name, "size": path.stat().st_size,
+                              "default": path.suffix.lower() == ".docx"})
+        for f in store.list_files(job_id, "output"):
+            files.append({"path": f"output/{f['path']}", "name": f["path"], "size": f["size"], "default": False})
+        return {"configured": mailer.configured, "sender": settings.mail_from, "to": to, "cc": [],
+                "subject": draft["subject"] or job["title"], "body": draft["body"], "attachments": files,
+                "can_send": job.get("status") == DONE, "sent": job.get("emails") or []}
+
+    @app.post("/api/jobs/{job_id}/email")
+    async def email_send(job_id: str, body: EmailIn):
+        """Send an approved result. Nothing goes out except through this call, made by you from the form."""
+        job = store.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.get("status") != DONE:
+            raise ValueError("ส่งอีเมลได้เฉพาะงานที่อนุมัติแล้ว")
+        if not mailer.configured:
+            raise ValueError("ยังไม่ได้ตั้งค่าอีเมลในไฟล์ .env (MAIL_SMTP_HOST, MAIL_FROM)")
+        attachments = [email_attachment_path(job, rel) for rel in dict.fromkeys(body.attachments)]
+        sent = await asyncio.to_thread(mailer.send, split_addresses(body.to), split_addresses(body.cc),
+                                       body.subject.strip(), body.body, attachments)
+        record = {**sent, "at": now_iso()}
+        with store.lock:
+            current = store.get(job_id)
+            if current is not None:
+                current["emails"] = list(current.get("emails") or []) + [record]
+                store.save(current)
+        attached = f" แนบ {', '.join(record['attachments'])}" if record["attachments"] else ""
+        store.append_step(job_id, {"run": len(job.get("runs") or []), "kind": "email",
+                                   "text": f"ส่งอีเมล \"{record['subject']}\" ถึง {', '.join(record['to'])}{attached}"})
+        return {"sent": record, "job": job_view(store.get(job_id))}
+
+    @app.post("/api/mail/test")
+    async def mail_test():
+        """An email to the sender address itself, to check the SMTP settings."""
+        if not mailer.configured:
+            raise ValueError("ยังไม่ได้ตั้งค่าอีเมลในไฟล์ .env (MAIL_SMTP_HOST, MAIL_FROM)")
+        return await asyncio.to_thread(mailer.send, [settings.mail_from], [], "ทดสอบการส่งอีเมลจาก AI Work Assistant",
+                                       "ตั้งค่าอีเมลถูกต้องแล้ว ส่งใบเสนอราคาและเอกสารที่อนุมัติจากหน้างานได้", [])
+
     @app.post("/api/notify/test")
     async def notify_test():
         if not notifier.channels:
@@ -643,6 +735,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
         jobs_dir = settings.jobs_dir
         return {
             "version": {"app": APP_VERSION, "claude": (state.get("claude") or {}).get("version")},
+            "mail": mailer.status(),
             "security": {"password": bool(settings.dashboard_password), "python_jail": True,
                          "calendar_link": bool(state.get("calendar_token"))},
             "claude": state.get("claude"),

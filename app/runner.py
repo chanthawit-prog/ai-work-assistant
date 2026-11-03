@@ -58,7 +58,7 @@ KB_RULE = "Bash(python3 -m kb_search *)"
 PYTHON_RULES = ["Bash(python3 -c *)", "Bash(python3 -m *)", "Bash(python3 output/*)", "Bash(python3 ./output/*)",
                 "Bash(cd *)"]
 # the app's own settings that Claude and its tools have no use for (passwords, notification tokens)
-PRIVATE_ENV_PREFIXES = ("NOTIFY_", "DASHBOARD_")
+PRIVATE_ENV_PREFIXES = ("NOTIFY_", "DASHBOARD_", "MAIL_")
 # the app's own files in the job folder: Claude neither sees them (Glob leaves denied files out) nor spends tokens
 # reading them, and cannot overwrite them
 INTERNAL_FILES = ("job.json", "events.jsonl", "steps.jsonl")

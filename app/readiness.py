@@ -178,6 +178,17 @@ def check_settings(settings: Settings, channels: list[str], kb_files: int | None
         out.append(item("notify", "แจ้งเตือน", OK, f"ส่งทาง {', '.join(channels)} · กดส่งข้อความทดสอบได้ในหน้าระบบ"))
     else:
         out.append(item("notify", "แจ้งเตือน", INFO, "ไม่ได้ตั้ง (ไม่บังคับ) ข้อ 8 ของคู่มือ"))
+    if settings.mail_host and settings.mail_from and settings.mail_security not in ("starttls", "ssl", "none"):
+        out.append(item("mail", "ส่งอีเมลจาก dashboard", WARN, f"MAIL_SMTP_SECURITY={settings.mail_security} ไม่รู้จัก",
+                        "ใช้ starttls (port 587), ssl (port 465) หรือ none (เซิร์ฟเวอร์ใน LAN ที่ไม่เข้ารหัส)"))
+    elif settings.mail_host and settings.mail_from:
+        out.append(item("mail", "ส่งอีเมลจาก dashboard", OK,
+                        f"ผ่าน {settings.mail_host}:{settings.mail_port} จาก {settings.mail_from} · กดส่งอีเมลทดสอบได้ในหน้าระบบ"))
+    elif settings.mail_host or settings.mail_from:
+        out.append(item("mail", "ส่งอีเมลจาก dashboard", WARN, "ตั้งค่าไม่ครบ",
+                        "ต้องมีทั้ง MAIL_SMTP_HOST และ MAIL_FROM ในไฟล์ .env (ข้อ 8.2 ของคู่มือ)"))
+    else:
+        out.append(item("mail", "ส่งอีเมลจาก dashboard", INFO, "ไม่ได้ตั้ง (ไม่บังคับ) ข้อ 8.2 ของคู่มือ"))
     if not settings.kb_enabled:
         out.append(item("kb", "ดัชนีค้นคลังความรู้", INFO, "ปิดอยู่ (KB_SEARCH=false)"))
     elif kb_files:
