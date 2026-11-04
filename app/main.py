@@ -44,7 +44,7 @@ from .tasks import TaskStore
 from .today import DigestScheduler, summary as today_summary
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.14.1"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
@@ -674,8 +674,11 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
                               "default": path.suffix.lower() == ".docx"})
         for f in store.list_files(job_id, "output"):
             files.append({"path": f"output/{f['path']}", "name": f["path"], "size": f["size"], "default": False})
+        body = draft["body"]
+        if settings.mail_from_name:  # Claude signs its drafts "[ชื่อผู้ส่ง]"; the sender's name from .env goes there
+            body = body.replace("[ชื่อผู้ส่ง]", settings.mail_from_name)
         return {"configured": mailer.configured, "sender": settings.mail_from, "to": to, "cc": [],
-                "subject": draft["subject"] or job["title"], "body": draft["body"], "attachments": files,
+                "subject": draft["subject"] or job["title"], "body": body, "attachments": files,
                 "can_send": job.get("status") == DONE, "sent": job.get("emails") or []}
 
     @app.post("/api/jobs/{job_id}/email")

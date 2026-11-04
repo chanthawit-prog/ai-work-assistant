@@ -112,7 +112,7 @@ def test_an_approved_result_goes_out_with_the_word_file(settings, smtp):
         result = store.job_dir(job["id"]) / "output" / "proposal.md"
         result.write_text(result.read_text("utf-8") + "\n## อีเมล\n\n> หัวข้อ: ใบเสนอราคา feeder 125 A\n>\n"
                           "> เรียน คุณประเสริฐ\n>\n> แนบใบเสนอราคา **เลขที่ QT-001** มาด้วยครับ\n> - ยืนราคา 30 วัน\n"
-                          "> - ไม่รวม VAT\n>\n> ขอบคุณครับ\n\nหมายเหตุภายใน: ยังไม่ยืนยันราคา MCCB\n", encoding="utf-8")
+                          "> - ไม่รวม VAT\n>\n> ขอบคุณครับ\n> [ชื่อผู้ส่ง]\n\nหมายเหตุภายใน: ยังไม่ยืนยันราคา MCCB\n", encoding="utf-8")
         before = client.post(f"/api/jobs/{job['id']}/email", json={"to": "prasert@acme.co.th", "subject": "x"})
         assert before.status_code == 409 and "อนุมัติ" in before.json()["detail"]  # not approved yet
         approve(store, tasks, settings, job["id"])
@@ -123,6 +123,7 @@ def test_an_approved_result_goes_out_with_the_word_file(settings, smtp):
         assert pre["subject"] == "ใบเสนอราคา feeder 125 A"
         assert pre["body"].startswith("เรียน คุณประเสริฐ\n\nแนบใบเสนอราคา เลขที่ QT-001 มาด้วยครับ\n• ยืนราคา 30 วัน")
         assert "หมายเหตุภายใน" not in pre["body"]
+        assert pre["body"].endswith("ขอบคุณครับ\nฝ่ายขาย PEC") and "[ชื่อผู้ส่ง]" not in pre["body"]  # signed with MAIL_FROM_NAME
         docx = [a for a in pre["attachments"] if a["name"].endswith(".docx")]
         assert len(docx) == 1 and docx[0]["default"] is True and docx[0]["path"].startswith("library/proposal-draft/")
         assert any(a["path"] == "output/proposal.md" and not a["default"] for a in pre["attachments"])
