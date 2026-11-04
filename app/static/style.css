@@ -708,3 +708,22 @@ mark { padding: 0 2px; border-radius: 3px; background: var(--accent-soft); color
   .quick-dates .btn { min-height: 44px; }
   .effort-pick select { min-height: 44px; }
 }
+
+/* ask the knowledge base */
+.ask-form textarea { width: 100%; min-height: 3.4em; resize: vertical; }
+.ask-form .form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); margin-top: var(--s3); }
+.ask-scope select { font: inherit; padding: 0.2em 0.4em; }
+.ask-card { margin-top: var(--s5); padding: var(--s4) var(--s5); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.ask-q { font-weight: 600; margin-bottom: var(--s3); overflow-wrap: anywhere; }
+.ask-a { margin-bottom: var(--s3); overflow-wrap: anywhere; }
+.ask-h { font-size: var(--fs-small); color: var(--ink-2); text-transform: none; margin: var(--s4) 0 var(--s2); }
+.cite { display: inline; margin: 0 0.05em; padding: 0 0.15em; border: 0; background: none; color: var(--accent-ink); font: inherit; font-size: 0.85em; cursor: pointer; text-decoration: underline; min-height: 0; }
+.ask-sources li { transition: background-color 0.4s; border-radius: var(--r-md); }
+.ask-sources li.flash { background: var(--accent-soft); }
+.ask-sources li.unused { opacity: 0.75; }
+.src-n { font-size: var(--fs-small); color: var(--ink-2); margin-right: 0.3em; }
+.ask-history { margin-top: var(--s5); }
+.ask-list { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--s2); }
+.ask-list summary { cursor: pointer; overflow-wrap: anywhere; padding: var(--s2) 0; }
+.ask-list details > * + * { margin-top: var(--s3); }
+.ask-list details { padding: 0 var(--s3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }

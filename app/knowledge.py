@@ -97,7 +97,10 @@ class KnowledgeIndex:
         self._wake.set()
 
     async def loop(self) -> None:
-        await asyncio.sleep(FIRST_DELAY)
+        try:  # the first refresh waits a minute, unless "update now" is pressed before that
+            await asyncio.wait_for(self._wake.wait(), timeout=FIRST_DELAY)
+        except asyncio.TimeoutError:
+            pass
         while True:
             try:
                 done = await self.refresh()

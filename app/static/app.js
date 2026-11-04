@@ -2355,6 +2355,129 @@ async function loadReadiness() {
 }
 
 /* ---------------------------------------------------------------- router */
+/* ask the knowledge base: the index finds passages, one short Claude call answers from them with [n] marks */
+const ASK_SCOPES = { "": "ทั้งหมด", knowledge: "คลังความรู้", library: "ผลงานที่อนุมัติแล้ว" };
+const kbFileLink = (path) => `/api/knowledge/file/${path.split("/").map(encodeURIComponent).join("/")}`;
+function citeMarks(html, count) {
+  return html.replace(/\[(\d{1,2})\]/g, (m, d) => (Number(d) >= 1 && Number(d) <= count
+    ? `<button type="button" class="cite" data-src="${d}" aria-label="แหล่งที่ ${d}">[${d}]</button>` : m));
+}
+function sourceList(sources, full) {
+  if (!sources || !sources.length) return "";
+  return `<ol class="kb-results ask-sources">${sources.map((s) => `
+    <li id="${full ? `src-${s.n}` : ""}" class="${s.cited === false ? "unused" : ""}"><span class="src-n">[${s.n}]</span>
+      <a href="${kbFileLink(s.path)}" target="_blank" rel="noopener">${esc(s.rel)}</a>
+      <span class="small muted">· ${esc(s.loc_label)} · ${esc(KB_SOURCE[s.source] || s.source)}${s.cited === false ? " · ไม่ได้ใช้ในคำตอบ" : ""}</span>
+      ${full ? `<p class="kb-excerpt">${esc(s.excerpt)}</p>` : ""}</li>`).join("")}</ol>`;
+}
+function answerCard(r) {
+  const n = (r.sources || []).length;
+  const meta = [r.seconds ? `ตอบใน ${Math.round(r.seconds)} วินาที` : "", r.model ? esc(r.model) : "",
+    r.terms && r.terms.length ? `ค้นด้วยคำ: ${esc(r.terms.join(", "))}` : ""].filter(Boolean).join(" · ");
+  return `<article class="ask-card" aria-label="คำตอบ">
+    <p class="ask-q">${esc(r.question)}</p>
+    <div class="doc ask-a">${citeMarks(renderMarkdown(r.answer || ""), n)}</div>
+    ${n ? `<h2 class="ask-h">แหล่งที่ค้นพบ</h2>${sourceList(r.sources, true)}` : ""}
+    <p class="small muted">${meta}</p>
+    <div class="form-actions">
+      <button type="button" class="btn" data-ask="copy">${icon("copy")}คัดลอกคำตอบ</button>
+      <button type="button" class="btn" data-ask="job">${icon("forward")}สั่งเป็นงานเต็มรูปแบบ</button>
+    </div></article>`;
+}
+function wireCites(root) {
+  $$(".cite", root).forEach((b) => b.addEventListener("click", () => {
+    const li = root.querySelector(`#src-${b.dataset.src}`);
+    if (!li) return;
+    li.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    li.classList.add("flash");
+    setTimeout(() => li.classList.remove("flash"), 1500);
+  }));
+}
+function wireAnswer(root, r) {
+  wireCites(root);
+  const copy = root.querySelector("[data-ask=copy]");
+  if (copy) copy.addEventListener("click", async () => {
+    toast((await copyText(r.answer || "")) ? "คัดลอกคำตอบแล้ว" : "คัดลอกไม่ได้ เลือกข้อความแล้วคัดลอกเอง", "");
+  });
+  const job = root.querySelector("[data-ask=job]");
+  if (job) job.addEventListener("click", async () => {
+    job.disabled = true;
+    try {
+      const fd = new FormData();
+      fd.append("type", "general");
+      fd.append("instructions", `${r.question}\n\n(ถามคลังความรู้ไว้ก่อนแล้ว คำตอบเบื้องต้น: ${(r.answer || "").slice(0, 600)})`);
+      const created = await api("/api/jobs", { method: "POST", body: fd });
+      toast("สร้างงานแล้ว Claude จะอ่านเอกสารทั้งฉบับ");
+      location.hash = `#/job/${encodeURIComponent(created.id)}`;
+    } catch (err) {
+      toast(err.message, "bad");
+      job.disabled = false;
+    }
+  });
+}
+async function loadAskHistory() {
+  const el = $("#askHistory");
+  if (!el) return;
+  const h = await api("/api/ask/history").catch(() => ({ items: [] }));
+  if (!$("#askHistory")) return;
+  el.innerHTML = h.items.length ? `<h2 class="ask-h">คำถามก่อนหน้า</h2><ul class="ask-list">${h.items.map((it) => `
+    <li><details><summary>${esc(it.question)} <span class="small muted">${esc(fmtTime(it.at))}</span></summary>
+      <div class="doc ask-a">${citeMarks(renderMarkdown(it.answer || ""), (it.sources || []).length)}</div>
+      ${sourceList(it.sources, false)}
+      <button type="button" class="btn quiet" data-again="${esc(it.question)}">${icon("retry")}ถามอีกครั้ง</button></details></li>`).join("")}</ul>` : "";
+  $$("[data-again]", el).forEach((b) => b.addEventListener("click", () => {
+    $("#askText").value = b.dataset.again;
+    $("#askText").focus();
+    window.scrollTo(0, 0);
+  }));
+}
+async function showAsk() {
+  $("#view").innerHTML = `<section class="ask" aria-labelledby="askTitle">
+    <div class="page-head"><div><h1 id="askTitle">ถามคลังความรู้</h1>
+      <p class="lede">พิมพ์คำถามสั้น ๆ ระบบค้นในคลังความรู้แล้วให้ Claude ตอบจากข้อความที่พบ พร้อมบอกไฟล์และหน้า
+        ไม่สร้างงาน ใช้โควต้าเล็กน้อย (คิดแบบเร็ว) ถ้าต้องการให้อ่านเอกสารทั้งฉบับ สั่งเป็นงานต่อได้จากคำตอบ</p></div></div>
+    <form class="ask-form" id="askForm" novalidate>
+      <label for="askText" class="sr-only">คำถาม</label>
+      <textarea id="askText" rows="2" maxlength="1000" placeholder="เช่น แรงดันตกในวงจรย่อยต้องไม่เกินเท่าไร · ราคา MCCB 125A Schneider · ลูกค้า ACME ใช้ breaker ยี่ห้ออะไร"></textarea>
+      <div class="form-actions">
+        <button type="submit" class="btn primary" id="askSend">${icon("search")}ถาม</button>
+        <label class="small muted ask-scope">ค้นใน <select id="askScope">${Object.entries(ASK_SCOPES).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select></label>
+        <span class="small muted">Ctrl+Enter เพื่อถาม</span>
+      </div>
+    </form>
+    <div id="askAnswer" aria-live="polite"></div>
+    <section class="ask-history" id="askHistory" aria-label="คำถามก่อนหน้า"></section></section>`;
+  const form = $("#askForm"), text = $("#askText"), out = $("#askAnswer");
+  const token = viewToken;
+  text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); }
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const question = text.value.trim();
+    if (!question) return text.focus();
+    const btn = $("#askSend");
+    btn.disabled = true;
+    btn.classList.add("busy");
+    out.innerHTML = `<p class="small muted" id="askWait">กำลังค้นในคลังความรู้และให้ Claude อ่าน… โดยปกติ 10–30 วินาที</p>`;
+    try {
+      const r = await postJSON("/api/ask", { question, within: $("#askScope").value });
+      if (token !== viewToken) return;
+      out.innerHTML = answerCard(r);
+      wireAnswer(out, r);
+      loadAskHistory();
+    } catch (err) {
+      if (token !== viewToken) return;
+      out.innerHTML = `<p class="notice error">${icon("alert")}<span>${esc(err.message)}</span></p>`;
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+    }
+  });
+  text.focus();
+  await loadAskHistory();
+}
+
 function route() {
   if (location.hash === "#view") return $("#view").focus(); // the skip link: move to the content, do not re-render
   if (unsaved() && !confirm("ยังไม่ได้บันทึกที่แก้ไว้ ออกจากหน้านี้และทิ้งที่แก้หรือไม่?")) {
@@ -2365,7 +2488,8 @@ function route() {
   viewToken += 1;
   const hash = location.hash || "#/";
   const tab = hash.startsWith("#/tasks") ? "tasks" : hash.startsWith("#/customer") ? "customers"
-    : hash.startsWith("#/schedules") ? "schedules" : hash.startsWith("#/system") ? "system" : "jobs";
+    : hash.startsWith("#/schedules") ? "schedules" : hash.startsWith("#/system") ? "system"
+    : hash.startsWith("#/ask") ? "ask" : "jobs";
   $$(".nav a").forEach((a) => {
     const on = a.dataset.tab === tab;
     a.classList.toggle("active", on);
@@ -2386,6 +2510,7 @@ function route() {
   if (hash.startsWith("#/customer/")) return showCustomer(decodeURIComponent(hash.slice(11))).catch(fail);
   if (hash.startsWith("#/schedules")) return showSchedules().catch(fail);
   if (hash.startsWith("#/system")) return showSystem().catch(fail);
+  if (hash.startsWith("#/ask")) return showAsk().catch(fail);
   return showHome().catch(fail);
 }
 

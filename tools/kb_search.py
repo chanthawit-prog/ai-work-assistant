@@ -372,26 +372,69 @@ def search(index: Path, query: str, limit: int = 8, within: str = "") -> dict:
         if any(t not in low for t in short_terms) or (r["path"], r["loc"]) in seen:
             continue
         seen.add((r["path"], r["loc"]))
-        doc = docs.get(r["path"])
-        root = doc["root"] if doc else r["path"].split("/", 1)[0]
-        rel = doc["rel"] if doc else r["path"].split("/", 1)[-1]
-        kind = doc["kind"] if doc else "text"
-        base = roots.get(root)
-        hit = _first_hit(r["text"], terms)
-        if kind == "xlsx":  # the location is the sheet; the row is written at the start of the matching line
-            line = r["text"][r["text"].rfind("\n", 0, hit) + 1:]
-            row = re.match(r"\[แถว (\d+)\]", line)
-            loc, label = r["loc"], f"ชีต {r['loc']}" + (f" · แถว {row.group(1)}" if row else "")
-        else:  # a passage starts at `loc`; for text and Word, count down to the line of the match itself
-            loc = r["loc"] if kind == "pdf" else r["loc"] + r["text"][:hit].count("\n")
-            label = f"{LOCATION.get(kind, 'บรรทัด')} {loc}"
-        results.append({"path": r["path"], "source": root, "rel": rel, "kind": kind, "loc": loc,
-                        "loc_label": label,
-                        "file": str(Path(base) / rel) if base else None,
-                        "excerpt": _excerpt(r["text"], terms), "text": r["text"]})
+        results.append(_row(r, docs, roots, terms))
         if len(results) >= limit:
             break
     return {"query": query, "terms": terms, "results": results}
+
+
+def _row(r, docs: dict, roots: dict, terms: list[str]) -> dict:
+    """One search result: where the passage is (file, page / sheet and row / line) and an excerpt."""
+    doc = docs.get(r["path"])
+    root = doc["root"] if doc else r["path"].split("/", 1)[0]
+    rel = doc["rel"] if doc else r["path"].split("/", 1)[-1]
+    kind = doc["kind"] if doc else "text"
+    base = roots.get(root)
+    hit = _first_hit(r["text"], terms)
+    if kind == "xlsx":  # the location is the sheet; the row is written at the start of the matching line
+        line = r["text"][r["text"].rfind("\n", 0, hit) + 1:]
+        row = re.match(r"\[แถว (\d+)\]", line)
+        loc, label = r["loc"], f"ชีต {r['loc']}" + (f" · แถว {row.group(1)}" if row else "")
+    else:  # a passage starts at `loc`; for text and Word, count down to the line of the match itself
+        loc = r["loc"] if kind == "pdf" else r["loc"] + r["text"][:hit].count("\n")
+        label = f"{LOCATION.get(kind, 'บรรทัด')} {loc}"
+    return {"path": r["path"], "source": root, "rel": rel, "kind": kind, "loc": loc, "loc_label": label,
+            "file": str(Path(base) / rel) if base else None, "excerpt": _excerpt(r["text"], terms), "text": r["text"]}
+
+
+def search_any(index: Path, terms: list[str], limit: int = 8, within: str = "") -> dict:
+    """Passages that contain any of the terms, the ones with more of them first (then bm25): for a question
+    in plain language, whose every phrase rarely sits in one passage. Terms under 3 characters only count
+    towards the ranking (the trigram index cannot look them up)."""
+    terms = [t for t in (normalise(t).strip() for t in terms) if t]
+    long_terms = [t for t in terms if len(t) >= 3]
+    if not long_terms:
+        raise SearchError("พิมพ์คำที่ต้องการค้น")
+    conn = connect(index, readonly=True)
+    try:
+        roots = json.loads((conn.execute("SELECT value FROM meta WHERE key='roots'").fetchone() or ["{}"])[0])
+        where, args = [], []
+        if within:
+            prefix = within.strip("/")
+            where.append("substr(path, 1, ?) = ?")
+            args += [len(prefix), prefix]
+        sql = ("SELECT path, loc, text, bm25(chunks) AS score FROM chunks WHERE chunks MATCH ?"
+               + "".join(f" AND {w}" for w in where) + " ORDER BY bm25(chunks) LIMIT ?")
+        match = " OR ".join('"' + t.replace('"', '""') + '"' for t in long_terms)
+        rows = conn.execute(sql, [match, *args, limit * 8]).fetchall()
+        docs = {r["path"]: r for r in conn.execute("SELECT path, root, rel, kind FROM docs")}
+    except sqlite3.OperationalError as exc:
+        raise SearchError(f"ค้นไม่ได้: {exc}") from None
+    finally:
+        conn.close()
+    ranked, seen = [], set()
+    for r in rows:
+        if (r["path"], r["loc"]) in seen:
+            continue
+        seen.add((r["path"], r["loc"]))
+        low = r["text"].lower()
+        matched = [t for t in terms if t.lower() in low]
+        ranked.append((-len(matched), r["score"], len(ranked), r, matched))
+    ranked.sort(key=lambda x: x[:3])
+    results = []
+    for _, _, _, r, matched in ranked[:limit]:
+        results.append({**_row(r, docs, roots, matched or terms), "matched": matched})
+    return {"terms": terms, "results": results}
 
 
 def show(index: Path, path: str) -> dict:

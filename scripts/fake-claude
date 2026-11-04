@@ -4,6 +4,8 @@
 It understands just enough of `claude -p --output-format stream-json`: it reads the task from stdin,
 emits realistic stream-json events slowly (so you can watch the timeline), and writes sample files
 for every "- output/..." line in the task. Use it with CLAUDE_BIN=/opt/app/scripts/fake-claude.
+Started with `--tools ""` (the dashboard's "ask the knowledge base"), it answers the question from the
+passages in the prompt, citing them as [n].
 
 Environment knobs (for tests):
   FAKE_CLAUDE_DELAY=0.6        seconds between events
@@ -65,6 +67,36 @@ def sample_content(rel: str, title: str) -> str:
             "## สิ่งที่ต้องยืนยัน\n- เปลี่ยน `CLAUDE_BIN` กลับเป็น `claude` เพื่อใช้งานจริง\n")
 
 
+def ask_mode(argv: list, prompt: str, delay: float, base: dict) -> int:
+    """No tools, one answer: what the dashboard's question page gets."""
+    question = re.search(r"^คำถาม: (.+)$", prompt, re.M)
+    passages = re.findall(r"^\[(\d+)\] (.+)$", prompt, re.M)
+    emit({"type": "system", "subtype": "init", "model": "fake-model", "cwd": str(Path.cwd()), "tools": [], **base})
+    time.sleep(delay)
+    if os.environ.get("FAKE_CLAUDE_RATE_LIMIT"):
+        emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": int(time.time()) + 120}, **base})
+        emit({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "duration_ms": 900,
+              "result": "Claude usage limit reached", "usage": {}, **base})
+        return 1
+    if os.environ.get("FAKE_CLAUDE_FAIL") == "auth":
+        emit({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1, "duration_ms": 300,
+              "result": "Not logged in · Please run /login", "usage": {}, **base})
+        return 1
+    if os.environ.get("FAKE_CLAUDE_FAIL"):
+        emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "num_turns": 1,
+              "duration_ms": 500, "errors": ["simulated failure"], "usage": {}, **base})
+        return 1
+    emit({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "utilization": 0.42}, **base})
+    text = f"คำตอบสาธิตสำหรับ “{question.group(1).strip() if question else '?'}” (fake-claude ยังไม่ได้ใช้ Claude จริง)\n"
+    for n, label in passages[:3]:
+        text += f"- พบในแหล่ง {label.split(' (')[0]} [{n}]\n"
+    text += "- ไม่พบในคลังความรู้: รายละเอียดอื่นนอกจากนี้" if passages else "ไม่พบในคลังความรู้"
+    emit({"type": "assistant", "parent_tool_use_id": None, "message": {"content": [{"type": "text", "text": text}]}, **base})
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "duration_ms": int(delay * 1000),
+          "result": text, "usage": {"input_tokens": 900, "output_tokens": 120}, **base})
+    return 0
+
+
 def main(argv: list) -> int:
     if "--version" in argv or "-v" in argv:
         print("0.0.0 (fake-claude demo)")
@@ -81,6 +113,8 @@ def main(argv: list) -> int:
     prompt = sys.stdin.read()
     delay = float(os.environ.get("FAKE_CLAUDE_DELAY", "0.6"))
     session = arg_value(argv, "--resume") or str(uuid.uuid4())
+    if arg_value(argv, "--tools") == "":
+        return ask_mode(argv, prompt, delay, {"session_id": session})
     title_match = re.search(r"^ชื่องาน: (.+)$", prompt, re.M)
     title = title_match.group(1).strip() if title_match else "งานสาธิต"
     inputs = re.findall(r"^- (input/.+)$", prompt, re.M)

@@ -30,6 +30,7 @@ from .export_docx import action_items_markdown, markdown_to_docx
 from .handoff import HANDOFF_TYPES, default_files, handoff
 from .jobtypes import EFFORTS, JOB_TYPES
 from .knowledge import KnowledgeIndex, kb_search, ocr_status
+from .ask import Asker
 from .mail import Mailer, drafted_message, find_emails, split_addresses
 from .notify import Notifier
 from .readiness import run_checks
@@ -43,7 +44,7 @@ from .tasks import TaskStore
 from .today import DigestScheduler, summary as today_summary
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.14.0"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file
@@ -101,6 +102,11 @@ class HandoffIn(BaseModel):
     effort: str = ""             # low | medium | high | max; empty or "auto": the new job type's default
     files: list[str] = []        # output files to pass on; empty: the job type's main outputs
     inputs: list[str] = []       # files attached to the original job to pass on as well (a photo, the transcript)
+
+
+class AskIn(BaseModel):
+    question: str = ""
+    within: str = ""
 
 
 class EmailIn(BaseModel):
@@ -299,6 +305,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     runner = Runner(store, tasks, state, settings, notifier=notifier)
     knowledge = KnowledgeIndex(settings, runner)
     runner.kb = knowledge
+    asker = Asker(settings, knowledge, state, runner)
     inbox = InboxWatcher(store, settings)
     scheduler = FollowupScheduler(store, tasks, state, settings)
     schedules = ScheduleStore(settings.data_dir / "config" / "schedules.json")
@@ -372,6 +379,7 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
     app.state.tasks, app.state.inbox, app.state.scheduler, app.state.notifier = tasks, inbox, scheduler, notifier
     app.state.schedules, app.state.recurring, app.state.knowledge = schedules, recurring, knowledge
     app.state.mailer = mailer
+    app.state.asker = asker
     if settings.dashboard_password:
         app.add_middleware(BasicAuth, user=settings.dashboard_user, password=settings.dashboard_password)
     app.add_middleware(UploadLimit, max_bytes=max_upload, message=too_large)
@@ -842,6 +850,16 @@ def create_app(settings: Settings | None = None, start_background: bool = True) 
             raise ValueError("ปิดการค้นคลังความรู้อยู่ (KB_SEARCH=false ในไฟล์ .env)")
         knowledge.request()
         return {"queued": True, "busy": knowledge.busy(), "running": knowledge.running}
+
+    # -- ask the knowledge base ---------------------------------------------------
+    @app.post("/api/ask")
+    async def ask(body: AskIn):
+        """One question, one short Claude call over the passages the index finds; no job is created."""
+        return await asker.ask(body.question, body.within)
+
+    @app.get("/api/ask/history")
+    async def ask_history(limit: int = 20):
+        return {"items": await asyncio.to_thread(asker.history, max(1, min(limit, 100)))}
 
     @app.get("/api/knowledge/file/{rel:path}")
     async def knowledge_file(rel: str):
