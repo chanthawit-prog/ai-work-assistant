@@ -44,7 +44,7 @@ from .tasks import TaskStore
 from .today import DigestScheduler, summary as today_summary
 from .watchers import FollowupScheduler, InboxWatcher, RecurringScheduler
 
-APP_VERSION = "0.14.1"
+APP_VERSION = "0.14.2"
 STATIC_DIR = Path(__file__).parent / "static"
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 # files from jobs and the knowledge folder are downloads, never pages of the dashboard: an HTML or SVG file

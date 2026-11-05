@@ -311,6 +311,9 @@ def status(index: Path) -> dict:
                 "by_kind": by_kind, "by_root": by_root, "updated_at": meta.get("updated_at"),
                 "notes": [{"path": r["path"], "note": r["note"]} for r in rows if r["note"]][:50],
                 "ocr_files": sum(1 for r in rows if r["ocr"]), "ocr_pages": sum(r["ocr"] or 0 for r in rows)}
+    except sqlite3.OperationalError:  # the very first refresh is creating the tables right now: nothing in it yet
+        return {"files": 0, "chunks": 0, "by_kind": {}, "by_root": {}, "notes": [], "updated_at": None,
+                "ocr_files": 0, "ocr_pages": 0}
     finally:
         conn.close()
 

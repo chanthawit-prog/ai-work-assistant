@@ -209,3 +209,13 @@ def test_knowledge_api(settings):
         assert opened.status_code == 200 and "แรงดันตก" in opened.text
         for bad in ("knowledge/../../etc/passwd", "secrets/x", "knowledge/", "library/nothing.md"):
             assert client.get(f"/api/knowledge/file/{bad}").status_code == 404
+
+
+def test_status_while_the_first_refresh_is_still_creating_the_index(tmp_path):
+    """The System page asks for the status the moment "update now" starts the first refresh: the file exists but
+    the tables are not committed yet (seen in the container test of 5 Nov). That is an empty index, not a 500."""
+    import sqlite3
+    index = tmp_path / "i.sqlite"
+    sqlite3.connect(str(index)).close()  # an empty database file, as the writer leaves it before its first commit
+    status = kb_search.status(index)
+    assert status["files"] == 0 and status["chunks"] == 0 and status["ocr_files"] == 0 and status["updated_at"] is None

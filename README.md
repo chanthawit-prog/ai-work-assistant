@@ -421,7 +421,7 @@ DATA_DIR=./data KNOWLEDGE_DIR=./knowledge CLAUDE_BIN=./scripts/fake-claude \
 - [ ] ถอดเสียงประชุมภาษาไทย (Whisper) ยังไม่ทำบน NAS RAM 6 GB เพราะโมเดลที่ถอดภาษาไทยได้ดีใช้ RAM 1–4 GB
   และช้ามากบน CPU ของ DS925+ ระหว่างนี้ใช้ transcript จาก Teams/Zoom หรือถอดบนคอมพิวเตอร์แล้ววางไฟล์ข้อความ
 - [x] ค้นคลังความรู้ด้วยดัชนีข้อความ รวม PDF และ Word ทั้งสำหรับ Claude และหน้าเว็บ
-- [x] build Docker image และรันด้วย docker-compose.yml จริง (ยกเว้นขั้น apt-get ที่ทดสอบในเครื่องนี้ไม่ได้)
+- [x] build Docker image และรันด้วย docker-compose.yml จริง (ขั้น apt-get ทดสอบกับ Ubuntu mirror แทน Debian ซึ่งเครื่องทดลองเข้าไม่ได้)
 - [x] เพิ่ม dashboard เป็นไอคอนบนหน้าจอมือถือ
 - [ ] ทดลองบน DS925+ จริง
 - [x] อ่านไฟล์ Excel (.xlsx) ทั้งที่แนบกับงานและในคลังความรู้
