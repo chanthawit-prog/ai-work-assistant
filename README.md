@@ -309,7 +309,8 @@ ai-assistant/
 
 ## เริ่มใช้งาน
 
-ขั้นตอนละเอียดอยู่ใน **[docs/setup-ds925.md](docs/setup-ds925.md)** สรุปสั้น ๆ ได้ดังนี้
+ขั้นตอนละเอียดอยู่ใน **[docs/setup-ds925.md](docs/setup-ds925.md)** และมี checklist แบบติ๊กทีละข้อสำหรับวันติดตั้งกับวันแรกที่ใช้ใน
+**[docs/checklist.md](docs/checklist.md)** สรุปสั้น ๆ ได้ดังนี้
 
 1. สร้างโฟลเดอร์ `ai-assistant/{data,knowledge,claude-home}` แล้วนำโค้ดนี้ไปไว้บน NAS
 2. คัดลอก `.env.example` เป็น `.env` แล้วแก้ path ตั้ง `DASHBOARD_PASSWORD` และช่องทางแจ้งเตือน (ถ้าต้องการ)
@@ -318,6 +319,8 @@ ai-assistant/
 5. เปิด `http://<IP ของ NAS>:8080` แล้วไปที่หน้า **ระบบ → ความพร้อมของระบบ** ระบบตรวจทุกส่วน
    (ล็อกอิน โฟลเดอร์ รั้ว Python รหัสผ่าน เขตเวลา หน่วยความจำ) และบอกวิธีแก้เป็นภาษาไทย
    ตรวจจาก terminal ได้ด้วย `sudo docker exec ai-work-assistant python3 -m app.readiness`
+6. วางคลังความรู้: คัดลอกโครงตัวอย่างใน [`examples/knowledge/`](examples/knowledge) (profile ลูกค้า price list แนวทางวิศวกรรม
+   ตารางสาย เงื่อนไขใบเสนอราคา พร้อม README) ไปไว้ใน `knowledge/` แล้วแทนไฟล์ตัวอย่างด้วยของจริง
 
 อยากลองระบบก่อนโดยไม่ใช้ Claude จริง ให้ตั้ง `CLAUDE_BIN=/opt/app/scripts/fake-claude` ใน `.env`
 dashboard จะขึ้นป้าย "โหมดสาธิต"
@@ -405,7 +408,7 @@ DATA_DIR=./data KNOWLEDGE_DIR=./knowledge CLAUDE_BIN=./scripts/fake-claude \
 | `tools/ocr_text.py` | อ่าน PDF ที่เป็นภาพสแกนด้วย tesseract ทีละหน้า พร้อม cache (ใช้ทั้งดัชนีและไฟล์แนบของงาน) |
 | `app/ask.py` | ถามคลังความรู้: แยกคำจากคำถาม ค้นดัชนี แล้วให้ Claude ตอบสั้น ๆ พร้อมอ้างอิง (เรียกครั้งเดียว ไม่มีเครื่องมือ) |
 | `tools/xlsx_text.py` | อ่านไฟล์ Excel (.xlsx) ด้วย Python ล้วน ใช้แปลงไฟล์แนบ ทำดัชนี และให้ Claude เรียกอ่าน |
-| `examples/knowledge/` | ตัวอย่างตารางสาย CSV และไฟล์รับรองเครื่องมือคำนวณ |
+| `examples/knowledge/` | โครงคลังความรู้พร้อมไฟล์ตัวอย่างสำหรับวางบน NAS วันติดตั้ง (profile ลูกค้า price list แนวทางวิศวกรรม ตารางสาย เงื่อนไขใบเสนอราคา) |
 | `app/main.py`, `app/static/` | API และหน้า dashboard (HTML/CSS/JS ล้วน ไม่ต้อง build) |
 | `PRODUCT.md` | brief การออกแบบ (ผู้ใช้ สถานการณ์ใช้งาน สี ฟอนต์ signature move) |
 | `scripts/fake-claude` | ตัวจำลอง `claude` สำหรับทดสอบ |
@@ -438,3 +441,4 @@ DATA_DIR=./data KNOWLEDGE_DIR=./knowledge CLAUDE_BIN=./scripts/fake-claude \
 - [x] ส่งผลงานที่อนุมัติแล้วเป็นอีเมลถึงลูกค้าจากหน้างาน พร้อมไฟล์ Word (ผ่าน SMTP ของบริษัท กดยืนยันก่อนส่งทุกครั้ง)
 - [x] อ่าน PDF ที่เป็นภาพสแกนด้วย OCR (tesseract ไทย+อังกฤษ) ทั้งในคลังความรู้และไฟล์แนบของงาน
 - [x] ถามคลังความรู้จากหน้าเว็บ ได้คำตอบสั้น ๆ พร้อมอ้างอิงไฟล์และหน้า โดยไม่ต้องสร้างงาน
+- [x] ชุดติดตั้ง: checklist วันติดตั้งและวันแรกที่ใช้ และคลังความรู้ตัวอย่างพร้อมวาง (ทดสอบแล้วว่าทำดัชนีได้ครบ ไม่มีไฟล์ที่อ่านไม่ได้)
